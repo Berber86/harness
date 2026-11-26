@@ -1,7 +1,18 @@
 import { createAppServer } from './app.js';
 
 const port = Number(process.env.PORT ?? 8787);
-const server = createAppServer();
+const managed = process.env.HARNESS_MANAGED === '1';
+
+const server = createAppServer({
+  onRestart: managed
+    ? () => {
+        setTimeout(() => {
+          server.close(() => process.exit(42));
+          setTimeout(() => process.exit(42), 500).unref();
+        }, 50);
+      }
+    : undefined,
+});
 
 // Allow a newly launched start.bat / start.command to replace an older instance cleanly.
 server.on('request', (req) => {

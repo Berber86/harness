@@ -1,4 +1,4 @@
-import { deflateRawSync } from 'node:zlib';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -86,4 +86,76 @@ export function buildZip(entries: ZipEntry[]): Buffer {
   end.writeUInt16LE(0, 20);
 
   return Buffer.concat([...localParts, centralDir, end]);
+}
+
+/** Parses a standard ZIP buffer (supports STORE=0, DEFLATE=8, and GitHub data descriptors). */
+export function parseZip(buffer: Buffer): ZipEntry[] {
+  let eocdOffset = -1;
+  const minOffset = Math.max(0, buffer.length - 65557);
+  for (let i = buffer.length - 22; i >= minOffset; i--) {
+    if (buffer.readUInt32LE(i) === 0x06054b50) {
+      const commentLen = buffer.readUInt16LE(i + 20);
+      if (i + 22 + commentLen === buffer.length) {
+        eocdOffset = i;
+        break;
+      }
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error('Повреждённый ZIP-архив (не найден заголовок)');
+  }
+
+  const totalEntries = buffer.readUInt16LE(eocdOffset + 10);
+  const centralDirOffset = buffer.readUInt32LE(eocdOffset + 16);
+  const entries: ZipEntry[] = [];
+  let ptr = centralDirOffset;
+
+  for (let i = 0; i < totalEntries; i++) {
+    if (ptr + 46 > buffer.length || buffer.readUInt32LE(ptr) !== 0x02014b50) {
+      throw new Error('Повреждённый ZIP-архив (ошибка каталога файлов)');
+    }
+    const method = buffer.readUInt16LE(ptr + 10);
+    const compressedSize = buffer.readUInt32LE(ptr + 20);
+    const uncompressedSize = buffer.readUInt32LE(ptr + 24);
+    const nameLen = buffer.readUInt16LE(ptr + 28);
+    const extraLen = buffer.readUInt16LE(ptr + 30);
+    const commentLen = buffer.readUInt16LE(ptr + 32);
+    const externalAttrs = buffer.readUInt32LE(ptr + 38);
+    const localOffset = buffer.readUInt32LE(ptr + 42);
+
+    const name = buffer.subarray(ptr + 46, ptr + 46 + nameLen).toString('utf8');
+    ptr += 46 + nameLen + extraLen + commentLen;
+
+    // Skip directories and symlinks (Unix mode 0o120000 in upper 16 bits).
+    const unixMode = (externalAttrs >>> 16) & 0o170000;
+    if (name.endsWith('/') || unixMode === 0o120000) continue;
+
+    if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) {
+      throw new Error(`Повреждённая запись в ZIP: ${name}`);
+    }
+    const localNameLen = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLen = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const dataEnd = dataStart + compressedSize;
+    if (dataEnd > buffer.length) {
+      throw new Error(`Неполные данные в ZIP для файла: ${name}`);
+    }
+
+    const compressed = buffer.subarray(dataStart, dataEnd);
+    let data: Buffer;
+    if (method === 0) {
+      data = Buffer.from(compressed);
+    } else if (method === 8) {
+      data = inflateRawSync(compressed);
+    } else {
+      throw new Error(`Неподдерживаемый метод сжатия ZIP (${method}) для ${name}`);
+    }
+
+    if (uncompressedSize && data.length !== uncompressedSize) {
+      throw new Error(`Размер файла ${name} не совпал при распаковке`);
+    }
+    entries.push({ name, data });
+  }
+
+  return entries;
 }

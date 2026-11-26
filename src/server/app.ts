@@ -38,6 +38,16 @@ import type {
   Usage,
 } from '../index.js';
 import { buildZip } from './zip.js';
+import {
+  applyGitHubUpdate,
+  checkGitHubUpdate,
+  detectLocalGitInfo,
+  getDefaultUpdateSource,
+  listUpdateBackups,
+  readUpdateState,
+  rollbackLatestUpdate,
+} from './updater.js';
+import type { FetchLike } from './updater.js';
 
 const DEFAULT_BASE_URL = 'https://api.hydraai.ru/v1';
 const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по программированию. Отвечай по-русски, коротко и понятно.
@@ -63,8 +73,11 @@ export interface AppServerOptions {
   sessionDir?: string;
   webDir?: string;
   skillsDir?: string;
+  appDir?: string;
   baseURL?: string;
   systemPrompt?: string;
+  fetchFn?: FetchLike;
+  onRestart?: () => void;
   providerFactory?: (options: { apiKey: string; baseURL: string; model: string }) => ModelProvider;
 }
 
@@ -372,10 +385,12 @@ function publicCheckpoint(checkpoint: Checkpoint) {
  * The API key is supplied by the browser per request and is never persisted.
  */
 export function createAppServer(options: AppServerOptions = {}): http.Server {
-  const workspaceDir = options.workspaceDir ?? path.resolve(process.cwd(), 'workspace');
-  const sessionDir = options.sessionDir ?? path.resolve(process.cwd(), '.harness', 'sessions');
-  const webDir = options.webDir ?? path.resolve(process.cwd(), 'web');
-  const skillsDir = options.skillsDir ?? path.resolve(process.cwd(), 'skills');
+  const appDir = options.appDir ?? process.cwd();
+  const workspaceDir = options.workspaceDir ?? path.resolve(appDir, 'workspace');
+  const sessionDir = options.sessionDir ?? path.resolve(appDir, '.harness', 'sessions');
+  const webDir = options.webDir ?? path.resolve(appDir, 'web');
+  const skillsDir = options.skillsDir ?? path.resolve(appDir, 'skills');
+  const fetchFn = options.fetchFn ?? fetch;
   const baseURL = (options.baseURL ?? process.env.HYDRA_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   const systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const store = new FileSessionStore(sessionDir);
@@ -861,6 +876,27 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             case '/api/skills':
               sendJson(res, 200, { skills: await loadSkills(skillsDir) });
               return;
+            case '/api/update/status': {
+              const [source, state, git, backups] = await Promise.all([
+                getDefaultUpdateSource(appDir),
+                readUpdateState(appDir),
+                detectLocalGitInfo(appDir),
+                listUpdateBackups(appDir),
+              ]);
+              sendJson(res, 200, {
+                source,
+                state,
+                git,
+                backups: backups.map((b) => ({
+                  id: b.id,
+                  createdAt: b.createdAt,
+                  commitSha: b.commitSha,
+                  filesCount: b.filesCount,
+                })),
+                canRestart: Boolean(options.onRestart),
+              });
+              return;
+            }
           }
         }
         if (url.pathname === '/preview' || url.pathname.startsWith('/preview/')) {
@@ -980,6 +1016,76 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             } catch (error) {
               sendJson(res, 400, { error: (error as Error).message });
             }
+            return;
+          }
+          case '/api/update/check': {
+            const body = JSON.parse(await readBody(req)) as { source?: string };
+            try {
+              const source = body.source?.trim() || (await getDefaultUpdateSource(appDir));
+              const check = await checkGitHubUpdate(source, appDir, fetchFn);
+              sendJson(res, 200, check);
+            } catch (error) {
+              sendJson(res, 400, { error: (error as Error).message });
+            }
+            return;
+          }
+          case '/api/update/apply': {
+            const body = JSON.parse(await readBody(req)) as { source?: string };
+            const source = body.source?.trim() || (await getDefaultUpdateSource(appDir));
+            res.writeHead(200, {
+              'content-type': 'text/event-stream; charset=utf-8',
+              'cache-control': 'no-cache, no-transform',
+              connection: 'keep-alive',
+              'x-accel-buffering': 'no',
+            });
+            try {
+              const result = await applyGitHubUpdate(source, appDir, {
+                fetchFn,
+                onProgress(stage, text) {
+                  sendSse(res, { type: 'progress', stage, text });
+                },
+              });
+              sendSse(res, {
+                type: 'done',
+                result,
+                canRestart: Boolean(options.onRestart),
+              });
+            } catch (error) {
+              sendSse(res, { type: 'error', message: (error as Error).message });
+            } finally {
+              if (!res.writableEnded) res.end();
+            }
+            return;
+          }
+          case '/api/update/rollback': {
+            try {
+              const result = await rollbackLatestUpdate(appDir);
+              const backups = await listUpdateBackups(appDir);
+              sendJson(res, 200, {
+                result,
+                backups: backups.map((b) => ({
+                  id: b.id,
+                  createdAt: b.createdAt,
+                  commitSha: b.commitSha,
+                  filesCount: b.filesCount,
+                })),
+                canRestart: Boolean(options.onRestart),
+              });
+            } catch (error) {
+              sendJson(res, 400, { error: (error as Error).message });
+            }
+            return;
+          }
+          case '/api/update/restart': {
+            if (!options.onRestart) {
+              sendJson(res, 200, {
+                restarting: false,
+                message: 'Перезапуск одной кнопкой доступен при запуске через start.bat или start.command. Закрой и снова открой программу.',
+              });
+              return;
+            }
+            sendJson(res, 200, { restarting: true });
+            options.onRestart();
             return;
           }
         }

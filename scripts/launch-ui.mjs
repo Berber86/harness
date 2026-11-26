@@ -50,24 +50,45 @@ try {
 const tsxCli = path.resolve('node_modules', 'tsx', 'dist', 'cli.mjs');
 const entry = path.resolve('src', 'server', 'index.ts');
 const args = existsSync(tsxCli) ? [tsxCli, entry] : ['--import', 'tsx', entry];
+const RESTART_EXIT_CODE = 42;
 
-const child = spawn(process.execPath, args, { stdio: 'inherit' });
-waitAndOpenBrowser();
+let currentChild = null;
+let browserOpened = false;
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
-    if (!child.killed) child.kill(sig);
+    if (currentChild && !currentChild.killed) currentChild.kill(sig);
   });
 }
 
-child.on('error', (error) => {
-  console.error(`Не удалось запустить программу: ${error.message}`);
-  process.exit(1);
-});
+function startChild() {
+  const child = spawn(process.execPath, args, {
+    stdio: 'inherit',
+    env: { ...process.env, HARNESS_MANAGED: '1' },
+  });
+  currentChild = child;
 
-child.on('exit', (code) => {
-  if (code && code !== 0) {
-    console.error(`Программа завершилась с ошибкой (код ${code}).`);
+  if (!browserOpened) {
+    browserOpened = true;
+    waitAndOpenBrowser();
   }
-  process.exit(code ?? 0);
-});
+
+  child.on('error', (error) => {
+    console.error(`Не удалось запустить программу: ${error.message}`);
+    process.exit(1);
+  });
+
+  child.on('exit', (code) => {
+    if (code === RESTART_EXIT_CODE) {
+      console.log('Перезапускаю «Мой помощник» после обновления…');
+      setTimeout(startChild, 300);
+      return;
+    }
+    if (code && code !== 0) {
+      console.error(`Программа завершилась с ошибкой (код ${code}).`);
+    }
+    process.exit(code ?? 0);
+  });
+}
+
+startChild();

@@ -312,3 +312,14 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 }
 .prompt-card-btn.primary:hover { background: #453be0; color: white; }
 
+.update-box {
+  margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  background: #f8fafc; border: 1px solid var(--border);
+  font-size: 12px; line-height: 1.5; color: var(--text);
+}
+.update-box.ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+.update-box.warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+.update-box.bad { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.update-actions { flex-wrap: wrap; }
+
+

@@ -88,6 +88,7 @@
         <div class="header-badges">
           <div id="tokenBadge" class="badge badge-soft" title="Оценка текущего контекста / всего потрачено в этом чате">📊 0 ткн</div>
           <button id="compactButton" type="button" class="mini-button" title="Сжать старые сообщения чата для экономии токенов" hidden>🗜 Сжать чат</button>
+          <button id="openUpdateBtn" type="button" class="mini-button" title="Скачать свежую версию с GitHub без Git">🔄 Обновить</button>
           <div id="teamBadge" class="badge badge-soft">Команда: 0</div>
           <div id="modelBadge" class="badge">gidra-code-auto</div>
         </div>
@@ -246,6 +247,33 @@
           <button type="submit" class="button button-primary">Сохранить в skills/</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="updateModal" class="modal" hidden>
+    <div class="modal-window modal-small">
+      <div class="modal-header">
+        <span>🔄 Обновление с GitHub</span>
+        <button id="closeUpdateModal" type="button" class="button button-secondary">Закрыть</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-top:0">
+          Скачивает новую версию из GitHub (даже без установленного Git). Твои проекты в <code>workspace/</code>, чаты и ключ HydraAI останутся нетронутыми.
+        </div>
+
+        <label class="field-label" for="updateSourceInput">Ссылка на GitHub (репозиторий, ветка или .zip)</label>
+        <input id="updateSourceInput" class="field" type="url" placeholder="https://github.com/Berber86/harness/tree/...">
+
+        <div id="updateCurrentInfo" class="update-box">Загружаю текущее состояние…</div>
+        <div id="updateStatusBox" class="update-box" hidden></div>
+
+        <div class="modal-actions update-actions">
+          <button type="button" id="rollbackUpdateBtn" class="button button-secondary" hidden>↩ Откатить обновление</button>
+          <button type="button" id="checkUpdateBtn" class="button button-secondary">🔍 Проверить</button>
+          <button type="button" id="applyUpdateBtn" class="button button-primary">⬇ Скачать и обновить</button>
+          <button type="button" id="restartAfterUpdateBtn" class="button button-primary" hidden>🔄 Перезапустить программу</button>
+        </div>
+      </div>
     </div>
   </div>
 

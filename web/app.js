@@ -1347,6 +1347,191 @@ $('skillForm').addEventListener('submit', async (event) => {
   }
 });
 
+let updateBusy = false;
+let updateCanRestart = false;
+
+function setUpdateBox(text, tone = '') {
+  const box = $('updateStatusBox');
+  box.textContent = text;
+  box.className = tone ? `update-box ${tone}` : 'update-box';
+  box.hidden = !text;
+}
+
+async function refreshUpdateModal() {
+  setUpdateBox('');
+  $('restartAfterUpdateBtn').hidden = true;
+  try {
+    const data = await api('/api/update/status');
+    const savedSource = localStorage.getItem('harness.updateSource');
+    $('updateSourceInput').value = savedSource || data.source || '';
+    updateCanRestart = Boolean(data.canRestart);
+
+    const sha = data.state?.commitSha || data.git?.sha;
+    const shortSha = sha ? sha.slice(0, 7) : 'неизвестно';
+    const branch = data.state?.branch || data.git?.branch || 'не определена';
+    const when = data.state?.updatedAt
+      ? new Date(data.state.updatedAt).toLocaleString('ru-RU')
+      : 'обновлений через кнопку ещё не было';
+    $('updateCurrentInfo').textContent = `Текущая ветка: ${branch} · коммит: ${shortSha} · ${when}`;
+
+    const backups = Array.isArray(data.backups) ? data.backups : [];
+    const rollbackBtn = $('rollbackUpdateBtn');
+    if (backups.length) {
+      const latest = backups[0];
+      const dateStr = latest.createdAt ? new Date(latest.createdAt).toLocaleString('ru-RU') : latest.id;
+      rollbackBtn.hidden = false;
+      rollbackBtn.title = `Восстановить ${latest.filesCount} файлов от ${dateStr}`;
+    } else {
+      rollbackBtn.hidden = true;
+    }
+  } catch (error) {
+    $('updateCurrentInfo').textContent = `Не удалось получить данные: ${error.message}`;
+  }
+}
+
+$('openUpdateBtn').addEventListener('click', () => {
+  $('updateModal').hidden = false;
+  refreshUpdateModal();
+});
+$('closeUpdateModal').addEventListener('click', () => {
+  if (!updateBusy) $('updateModal').hidden = true;
+});
+$('updateModal').addEventListener('click', (event) => {
+  if (event.target === $('updateModal') && !updateBusy) $('updateModal').hidden = true;
+});
+$('updateSourceInput').addEventListener('change', () => {
+  localStorage.setItem('harness.updateSource', $('updateSourceInput').value.trim());
+});
+
+$('checkUpdateBtn').addEventListener('click', async () => {
+  if (updateBusy) return;
+  const source = $('updateSourceInput').value.trim();
+  localStorage.setItem('harness.updateSource', source);
+  setUpdateBox('Проверяю свежие коммиты на GitHub…');
+  try {
+    const data = await api('/api/update/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    const rSha = data.remoteSha ? data.remoteSha.slice(0, 7) : '?';
+    const lSha = data.localSha ? data.localSha.slice(0, 7) : 'неизвестен';
+    if (data.hasUpdate) {
+      setUpdateBox(
+        `Доступно обновление на ветке ${data.branch}: ${rSha} (у тебя ${lSha}).\nПоследнее изменение: «${data.remoteMessage}»`,
+        'warn',
+      );
+    } else {
+      setUpdateBox(`У тебя уже установлена свежая версия (${rSha} на ветке ${data.branch}).`, 'ok');
+    }
+  } catch (error) {
+    setUpdateBox(`Не удалось проверить: ${error.message}`, 'bad');
+  }
+});
+
+$('applyUpdateBtn').addEventListener('click', async () => {
+  if (updateBusy) return;
+  const source = $('updateSourceInput').value.trim();
+  localStorage.setItem('harness.updateSource', source);
+  updateBusy = true;
+  $('applyUpdateBtn').disabled = true;
+  $('checkUpdateBtn').disabled = true;
+  $('rollbackUpdateBtn').disabled = true;
+  $('restartAfterUpdateBtn').hidden = true;
+  setUpdateBox('Подключаюсь к GitHub…');
+
+  try {
+    const response = await fetch('/api/update/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || `Ошибка ${response.status}`);
+    }
+    let result = null;
+    await readSse(response, (ev) => {
+      if (ev.type === 'progress') {
+        setUpdateBox(ev.text);
+      } else if (ev.type === 'error') {
+        throw new Error(ev.message);
+      } else if (ev.type === 'done') {
+        result = ev.result;
+        updateCanRestart = Boolean(ev.canRestart);
+      }
+    });
+    if (result) {
+      const pkgNote = result.packageJsonChanged ? ' (изменился package.json — при запуске проверь зависимости)' : '';
+      setUpdateBox(
+        `Готово! Обновлено файлов: ${result.filesWritten}. Резервная копия сохранена.${pkgNote}`,
+        'ok',
+      );
+      $('rollbackUpdateBtn').hidden = false;
+      $('restartAfterUpdateBtn').hidden = false;
+      toast('Обновление установлено!');
+    }
+  } catch (error) {
+    setUpdateBox(`Ошибка обновления: ${error.message}`, 'bad');
+    toast(error.message);
+  } finally {
+    updateBusy = false;
+    $('applyUpdateBtn').disabled = false;
+    $('checkUpdateBtn').disabled = false;
+    $('rollbackUpdateBtn').disabled = false;
+  }
+});
+
+$('rollbackUpdateBtn').addEventListener('click', async () => {
+  if (updateBusy) return;
+  if (!confirm('Откатить программу к предыдущей версии из резервной копии?')) return;
+  setUpdateBox('Возвращаю файлы предыдущей версии…');
+  try {
+    const data = await api('/api/update/rollback', { method: 'POST' });
+    updateCanRestart = Boolean(data.canRestart);
+    setUpdateBox(
+      `Откат выполнен: восстановлено файлов — ${data.result.filesRestored}, удалено новых — ${data.result.filesRemoved}.`,
+      'ok',
+    );
+    $('restartAfterUpdateBtn').hidden = false;
+    await refreshUpdateModal();
+    setUpdateBox(
+      `Откат выполнен: восстановлено файлов — ${data.result.filesRestored}, удалено новых — ${data.result.filesRemoved}. Перезапусти программу.`,
+      'ok',
+    );
+    $('restartAfterUpdateBtn').hidden = false;
+  } catch (error) {
+    setUpdateBox(`Не удалось откатить: ${error.message}`, 'bad');
+  }
+});
+
+$('restartAfterUpdateBtn').addEventListener('click', async () => {
+  setUpdateBox('Перезапускаю программу…');
+  try {
+    const data = await api('/api/update/restart', { method: 'POST' });
+    if (!data.restarting) {
+      setUpdateBox(data.message || 'Закрой окно программы и запусти start.bat (start.command) заново.', 'warn');
+      return;
+    }
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 15_000) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const res = await fetch('/api/update/status');
+        if (res.ok) {
+          window.location.reload();
+          return;
+        }
+      } catch {
+        // still restarting
+      }
+    }
+    setUpdateBox('Сервер перезагружается — обнови страницу (F5) через пару секунд.', 'warn');
+  } catch (error) {
+    setUpdateBox(error.message, 'bad');
+  }
+});
+
 $('apiKey').value = state.apiKey;
 $('demoMode').checked = state.demo;
 $('rulesInput').value = state.rules;

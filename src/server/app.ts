@@ -18,8 +18,10 @@ import { buildZip } from './zip.js';
 
 const DEFAULT_BASE_URL = 'https://api.hydraai.ru/v1';
 const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по программированию. Отвечай по-русски, коротко и понятно.
-Рабочая папка — это песочница: меняй файлы только внутри неё. Перед изменением файла прочитай его.
-Используй инструмент write для записи файлов и bash только для простых команд проверки. Объясняй, что ты сделал.`;
+Рабочая папка — это песочница: меняй файлы только внутри неё.
+Для просмотра списка файлов и поиска по коду используй list_files и search (не запускай ls/grep через bash).
+Для чтения больших файлов используй read с offset и limit. Для небольших правок используй edit вместо полной перезаписи через write — это экономит токены.
+Инструмент bash используй только для запуска программ, тестов и сборки. Объясняй, что ты сделал.`;
 
 export interface AppServerOptions {
   workspaceDir?: string;
@@ -142,7 +144,7 @@ interface IncomingRole {
   tools?: unknown;
 }
 
-const VALID_ROLE_TOOLS = new Set<RoleToolName>(['read', 'write', 'bash']);
+const VALID_ROLE_TOOLS = new Set<RoleToolName>(['read', 'edit', 'write', 'list_files', 'search', 'bash']);
 
 function normalizeRoles(raw: IncomingRole[] | undefined, fallbackModel: string): AgentRole[] {
   if (!Array.isArray(raw)) return [];
@@ -168,7 +170,7 @@ function normalizeRoles(raw: IncomingRole[] | undefined, fallbackModel: string):
         : `Ты — ${name}. Выполняй задачи аккуратно внутри рабочей папки workspace.`,
       model: { provider: 'hydra', model: modelName, maxTokens: 4096 },
       enabled: Boolean(item.enabled),
-      tools: tools && tools.length ? tools : ['read', 'write', 'bash'],
+      tools: tools && tools.length ? tools : ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
       maxTurns: 8,
     });
   }

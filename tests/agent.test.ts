@@ -50,7 +50,7 @@ test('agent calls a write tool, streams events and rolls the run back', async ()
     assert.ok(events.some((event) => event.type === 'text_delta'));
     assert.ok(events.some((event) => event.type === 'tool_start'));
     assert.ok(events.some((event) => event.type === 'tool_end'));
-    assert.equal(provider.requests[0]?.tools.length, 3);
+    assert.equal(provider.requests[0]?.tools.length, 6);
 
     assert.equal(session.checkpoints.length, 1);
     const checkpoint = session.checkpoints[0]!;

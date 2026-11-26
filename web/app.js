@@ -15,39 +15,53 @@ const DEFAULT_ROLES = [
     name: 'Программист',
     description: 'Пишет и редактирует код в папке workspace, запускает простые проверки.',
     instructions:
-      'Ты — программист. Пиши чистый и понятный код только внутри рабочей папки workspace. Перед изменением файла сначала прочитай его, не трать шаги впустую и кратко сообщи, что изменил.',
+      'Ты — программист. Работай только внутри папки workspace. Для поиска файлов используй list_files и search, для чтения больших файлов — read с offset/limit, для точечных правок — edit вместо полной перезаписи через write. Кратко сообщай, что изменил.',
     model: 'gidra-code-auto',
     enabled: true,
-    tools: ['read', 'write', 'bash'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
   },
   {
     id: 'reviewer',
     name: 'Проверяющий',
     description: 'Проверяет код на ошибки, баги и крайние случаи без изменения файлов.',
     instructions:
-      'Ты — внимательный проверяющий (код-ревьюер). Прочитай указанные файлы, при необходимости запусти проверку и коротко перечисли найденные проблемы или подтверди, что всё хорошо. Не изменяй файлы.',
+      'Ты — внимательный проверяющий (код-ревьюер). Используй list_files, search и read (с offset/limit для больших файлов), при необходимости запусти проверку через bash и коротко перечисли найденные проблемы. Не изменяй файлы.',
     model: 'hydra-gpt-mini',
     enabled: true,
-    tools: ['read', 'bash'],
+    tools: ['read', 'list_files', 'search', 'bash'],
   },
   {
     id: 'docs',
     name: 'Писатель документации',
     description: 'Пишет понятные README, инструкции и комментарии к коду на русском языке.',
     instructions:
-      'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала прочитай код, затем обнови нужный документ.',
+      'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала изучи файлы через list_files/read, затем обнови нужный документ через edit или write.',
     model: 'hydra-gpt-mini',
     enabled: false,
-    tools: ['read', 'write'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search'],
   },
 ];
+
+function upgradeRoleTools(tools) {
+  const set = new Set(Array.isArray(tools) ? tools : ['read']);
+  if (set.has('read')) {
+    set.add('list_files');
+    set.add('search');
+  }
+  if (set.has('write')) {
+    set.add('edit');
+  }
+  return [...set];
+}
 
 function loadStoredRoles() {
   try {
     const raw = localStorage.getItem('harness.roles');
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length) return parsed;
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed.map((role) => ({ ...role, tools: upgradeRoleTools(role.tools) }));
+      }
     }
   } catch {
     // ignore corrupted storage
@@ -789,10 +803,10 @@ $('roleForm').addEventListener('submit', (event) => {
   const description = $('roleDescInput').value.trim();
   const instructions = $('roleInstInput').value.trim();
   const tools = [];
-  if ($('roleToolRead').checked) tools.push('read');
-  if ($('roleToolWrite').checked) tools.push('write');
+  if ($('roleToolRead').checked) tools.push('read', 'list_files', 'search');
+  if ($('roleToolWrite').checked) tools.push('write', 'edit');
   if ($('roleToolBash').checked) tools.push('bash');
-  if (!tools.length) tools.push('read');
+  if (!tools.length) tools.push('read', 'list_files', 'search');
 
   if (state.editingRoleId) {
     const role = state.roles.find((item) => item.id === state.editingRoleId);

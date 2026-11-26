@@ -1,13 +1,20 @@
 import { resolveProvider } from '../providers/registry.js';
 import type { ContextOptions } from '../session/context.js';
 import { Session } from '../session/session.js';
-import { createBashTool, createReadTool, createWriteTool } from '../tools/builtin.js';
+import {
+  createBashTool,
+  createEditTool,
+  createListFilesTool,
+  createReadTool,
+  createSearchTool,
+  createWriteTool,
+} from '../tools/builtin.js';
 import type { BashToolOptions } from '../tools/builtin.js';
 import type { AgentEvent, ModelConfig, ModelProvider, Tool } from '../types.js';
 import { runAgentLoop } from './loop.js';
 import type { LoopDetectionOptions } from './loop.js';
 
-export type RoleToolName = 'read' | 'write' | 'bash';
+export type RoleToolName = 'read' | 'edit' | 'write' | 'list_files' | 'search' | 'bash';
 
 export interface AgentRole {
   /** Unique identifier used by `delegate({ role })`, e.g. 'coder'. */
@@ -46,41 +53,44 @@ export const DEFAULT_ROLE_PRESETS: DefaultRolePreset[] = [
     name: 'Программист',
     description: 'Пишет и редактирует код в папке workspace, запускает простые проверки.',
     instructions:
-      'Ты — программист. Пиши чистый и понятный код только внутри рабочей папки workspace. Перед изменением файла сначала прочитай его, не трать шаги впустую и кратко сообщи, что изменил.',
+      'Ты — программист. Работай только внутри папки workspace. Для поиска файлов используй list_files и search, для чтения больших файлов — read с offset/limit, для точечных правок — edit вместо полной перезаписи через write. Кратко сообщай, что изменил.',
     defaultModel: 'gidra-code-auto',
     enabled: true,
-    tools: ['read', 'write', 'bash'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
   },
   {
     id: 'reviewer',
     name: 'Проверяющий',
     description: 'Проверяет код на ошибки, баги и крайние случаи без изменения файлов.',
     instructions:
-      'Ты — внимательный проверяющий (код-ревьюер). Прочитай указанные файлы, при необходимости запусти проверку и коротко перечисли найденные проблемы или подтверди, что всё хорошо. Не изменяй файлы.',
+      'Ты — внимательный проверяющий (код-ревьюер). Используй list_files, search и read (с offset/limit для больших файлов), при необходимости запусти проверку через bash и коротко перечисли найденные проблемы. Не изменяй файлы.',
     defaultModel: 'hydra-gpt-mini',
     enabled: true,
-    tools: ['read', 'bash'],
+    tools: ['read', 'list_files', 'search', 'bash'],
   },
   {
     id: 'docs',
     name: 'Писатель документации',
     description: 'Пишет понятные README, инструкции и комментарии к коду на русском языке.',
     instructions:
-      'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала прочитай код, затем обнови нужный документ.',
+      'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала изучи файлы через list_files/read, затем обнови нужный документ через edit или write.',
     defaultModel: 'hydra-gpt-mini',
     enabled: false,
-    tools: ['read', 'write'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search'],
   },
 ];
 
 export function createToolsForRole(
-  allowed: RoleToolName[] = ['read', 'write', 'bash'],
+  allowed: RoleToolName[] = ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
   bashOptions: BashToolOptions = {},
 ): Tool[] {
   const set = new Set<RoleToolName>(allowed);
   const tools: Tool[] = [];
   if (set.has('read')) tools.push(createReadTool());
+  if (set.has('edit')) tools.push(createEditTool());
   if (set.has('write')) tools.push(createWriteTool());
+  if (set.has('list_files')) tools.push(createListFilesTool());
+  if (set.has('search')) tools.push(createSearchTool());
   if (set.has('bash')) tools.push(createBashTool(bashOptions));
   return tools;
 }

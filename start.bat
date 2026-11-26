@@ -1,19 +1,26 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title Мой помощник
+title My Assistant
 
-if not exist "node_modules" (
-  echo Первый запуск: устанавливаю компоненты. Это займет минуту.
+where node >nul 2>nul
+if errorlevel 1 (
+  echo Node.js is not installed. Please install LTS from https://nodejs.org
+  pause
+  exit /b 1
+)
+
+if not exist "node_modules\tsx" (
+  echo Installing dependencies, please wait...
   call npm install
   if errorlevel 1 goto :fail
 )
 
-echo Открываю окно программы. Это черное окно можно свернуть, но не закрывать.
-powershell -NoProfile -Command "Start-Sleep -Seconds 3; Start-Process 'http://localhost:8787'"
-call npm run ui
+node scripts\launch-ui.mjs
+if errorlevel 1 goto :fail
 goto :eof
 
 :fail
-echo Не удалось установить компоненты. Напиши об этом в чат, и мы разберемся.
+echo Failed to start. Please copy this message into chat.
 pause
+exit /b 1

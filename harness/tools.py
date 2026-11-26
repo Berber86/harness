@@ -14,6 +14,7 @@ MAX_OUTPUT_CHARS = 20_000
 IGNORE_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".chainlit"}
 
 OnAskUser = Callable[[str, list[str] | None], Awaitable[str]]
+OnDelegate = Callable[[str], Awaitable[str]]
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -496,6 +497,20 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": "Delegate routine file reading, searching, code editing, or running commands/tests to the budget worker model. Give clear, specific instructions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Clear, self-contained task for the worker model"},
+                },
+                "required": ["task"],
             },
         },
     },

@@ -10,6 +10,7 @@ from harness.agent import run_agent_turn
 load_dotenv()
 
 DEFAULT_MODEL = os.getenv("HARNESS_MODEL", "openai/claude-3-7-sonnet-latest")
+DEFAULT_WORKER_MODEL = os.getenv("HARNESS_WORKER_MODEL", "openai/gpt-4o-mini")
 DEFAULT_API_BASE = os.getenv("HARNESS_API_BASE", "https://api.hydraai.ru/v1")
 DEFAULT_API_KEY = os.getenv("HARNESS_API_KEY", "")
 DEFAULT_WORKDIR = os.getenv("HARNESS_WORKDIR", ".")
@@ -20,6 +21,7 @@ async def on_chat_start():
     workdir = Path(DEFAULT_WORKDIR).expanduser().resolve()
     cl.user_session.set("messages", [])
     cl.user_session.set("model", DEFAULT_MODEL)
+    cl.user_session.set("worker_model", DEFAULT_WORKER_MODEL)
     cl.user_session.set("api_base", DEFAULT_API_BASE)
     cl.user_session.set("api_key", DEFAULT_API_KEY)
     cl.user_session.set("workdir", str(workdir))
@@ -73,12 +75,14 @@ async def on_settings_update(settings: dict):
         model = preset.split(" ", 1)[0].strip()
     else:
         model = settings.get("model", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    worker_model = settings.get("worker_model", DEFAULT_WORKER_MODEL).strip() or None
     api_base = settings.get("api_base", DEFAULT_API_BASE).strip() or None
     api_key = settings.get("api_key", DEFAULT_API_KEY).strip() or None
     workdir_raw = settings.get("workdir", DEFAULT_WORKDIR).strip() or DEFAULT_WORKDIR
     workdir = Path(workdir_raw).expanduser().resolve()
 
     cl.user_session.set("model", model)
+    cl.user_session.set("worker_model", worker_model)
     cl.user_session.set("api_base", api_base)
     cl.user_session.set("api_key", api_key)
     cl.user_session.set("workdir", str(workdir))
@@ -97,6 +101,7 @@ async def on_settings_update(settings: dict):
 async def on_message(message: cl.Message):
     messages = cl.user_session.get("messages", [])
     model = cl.user_session.get("model", DEFAULT_MODEL)
+    worker_model = cl.user_session.get("worker_model", DEFAULT_WORKER_MODEL)
     api_base = cl.user_session.get("api_base", DEFAULT_API_BASE)
     api_key = cl.user_session.get("api_key", DEFAULT_API_KEY)
     workdir = Path(cl.user_session.get("workdir", DEFAULT_WORKDIR)).resolve()
@@ -142,6 +147,7 @@ async def on_message(message: cl.Message):
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
             on_ask_user=on_ask_user,
+            worker_model=worker_model,
             api_base=api_base,
             api_key=api_key,
         )

@@ -47,12 +47,45 @@ async def run_agent_turn(
     on_tool_start: OnToolStart,
     on_tool_end: OnToolEnd,
     on_ask_user: OnAskUser | None = None,
+    worker_model: str | None = None,
     api_base: str | None = None,
     api_key: str | None = None,
     max_steps: int = 12,
 ) -> list[dict[str, Any]]:
     """Run the tool-calling agent loop until a final response or max_steps."""
     system_prompt = build_system_prompt(workdir)
+
+    async def _delegate(task: str) -> str:
+        if not worker_model:
+            return "Error: worker_model is not set."
+        worker_msgs: list[dict[str, Any]] = [{"role": "user", "content": task}]
+        worker_chunks: list[str] = []
+
+        async def _w_delta(tok: str) -> None:
+            worker_chunks.append(tok)
+
+        async def _w_start(name: str, args: str) -> Any:
+            return await on_tool_start(f"[worker] {name}", args)
+
+        async def _w_end(ctx: Any, res: str) -> None:
+            await on_tool_end(ctx, res)
+
+        await run_agent_turn(
+            messages=worker_msgs,
+            model=worker_model,
+            workdir=workdir,
+            on_text_delta=_w_delta,
+            on_tool_start=_w_start,
+            on_tool_end=_w_end,
+            on_ask_user=on_ask_user,
+            worker_model=None,
+            api_base=api_base,
+            api_key=api_key,
+            max_steps=8,
+        )
+        return "".join(worker_chunks) or "(worker finished without text output)"
+
+    on_delegate = _delegate if worker_model else None
 
     for _ in range(max_steps):
         context_messages = _trim_history(messages)
@@ -115,7 +148,11 @@ async def run_agent_turn(
             fn_args = tc["function"]["arguments"]
             step_ctx = await on_tool_start(fn_name, fn_args)
             result = await execute_tool(
-                workdir, fn_name, fn_args, on_ask_user=on_ask_user
+                workdir,
+                fn_name,
+                fn_args,
+                on_ask_user=on_ask_user,
+                on_delegate=on_delegate,
             )
             await on_tool_end(step_ctx, result)
 

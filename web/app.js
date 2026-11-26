@@ -85,12 +85,36 @@ function loadStoredModels() {
   return DEFAULT_MODEL_OPTIONS;
 }
 
+const DEFAULT_TEMPLATES = [
+  { id: 'tpl-check', label: '🔍 Проверь ошибки', prompt: 'Проверь файлы в песочнице на ошибки и подскажи, что можно улучшить.' },
+  { id: 'tpl-site', label: '✨ Сделай сайт', prompt: 'Создай аккуратную HTML-страницу с современным дизайном в workspace.' },
+  { id: 'tpl-run', label: '📖 Как запустить?', prompt: 'Посмотри файлы в песочнице и объясни простыми словами, как запустить эту программу.' },
+];
+
+function loadStoredTemplates() {
+  try {
+    const raw = localStorage.getItem('harness.templates');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_TEMPLATES.map((t) => ({ ...t }));
+}
+
 const state = {
   apiKey: localStorage.getItem('harness.apiKey') || '',
   model: localStorage.getItem('harness.model') || 'gidra-code-auto',
   demo: localStorage.getItem('harness.demo') === null ? !localStorage.getItem('harness.apiKey') : localStorage.getItem('harness.demo') === '1',
+  mode: localStorage.getItem('harness.mode') === 'plan' ? 'plan' : 'act',
+  rules: localStorage.getItem('harness.rules') ?? 'Пиши максимально простой и понятный код. Объясняй по-русски без сложного жаргона.',
+  templates: loadStoredTemplates(),
   sessionId: null,
   lastCheckpointId: null,
+  contextTokens: 0,
+  sessionTokens: 0,
   busy: false,
   controller: null,
   files: [],
@@ -248,6 +272,8 @@ async function sendMessage(promptText) {
         apiKey: state.apiKey,
         model: state.model,
         demo: state.demo,
+        mode: state.mode,
+        rules: state.rules,
         sessionId: state.sessionId,
         roles: state.roles,
       }),
@@ -264,6 +290,7 @@ async function sendMessage(promptText) {
       switch (event.type) {
         case 'started':
           state.sessionId = event.sessionId;
+          $('compactButton').hidden = false;
           markActiveSession();
           break;
         case 'text':
@@ -294,6 +321,19 @@ async function sendMessage(promptText) {
           if (event.files) {
             state.files = event.files;
             renderFiles();
+          }
+          if (typeof event.result.contextTokens === 'number') {
+            state.contextTokens = event.result.contextTokens;
+          }
+          if (event.result.sessionUsage && typeof event.result.sessionUsage.totalTokens === 'number') {
+            state.sessionTokens = event.result.sessionUsage.totalTokens;
+          }
+          updateTokenBadge();
+          if (event.result.usage && event.result.usage.totalTokens > 0) {
+            const note = document.createElement('div');
+            note.className = 'usage-note';
+            note.textContent = `📊 Ответ: +${event.result.usage.totalTokens.toLocaleString('ru-RU')} ткн (вход ${event.result.usage.inputTokens.toLocaleString('ru-RU')} / выход ${event.result.usage.outputTokens.toLocaleString('ru-RU')})`;
+            assistant.bubble.appendChild(note);
           }
           if (event.result.stopReason === 'error' && !fullText) {
             appendActivity(assistant.activity, 'Задача не выполнена. Проверь ключ и попробуй ещё раз.');
@@ -600,6 +640,10 @@ async function openSession(id) {
   try {
     const data = await api(`/api/session?id=${encodeURIComponent(id)}`);
     state.sessionId = data.session.id;
+    state.contextTokens = data.session.contextTokens ?? 0;
+    state.sessionTokens = data.session.usage?.totalTokens ?? 0;
+    updateTokenBadge();
+    $('compactButton').hidden = false;
     $('messages').innerHTML = '';
     const shown = data.session.messages.filter((message) => message.role === 'user' || (message.role === 'assistant' && message.content));
     if (!shown.length) addMessage('user', 'Новый чат');
@@ -617,6 +661,10 @@ function newChat() {
   if (state.busy) return;
   state.sessionId = null;
   state.lastCheckpointId = null;
+  state.contextTokens = 0;
+  state.sessionTokens = 0;
+  updateTokenBadge();
+  $('compactButton').hidden = true;
   $('messages').innerHTML = welcomeHtml;
   $('chatTitle').textContent = 'Новый чат';
   $('changes').className = 'changes-empty';
@@ -942,6 +990,7 @@ $('deleteRoleButton').addEventListener('click', () => {
 $('roleForm').addEventListener('submit', (event) => {
   event.preventDefault();
   const name = $('roleNameInput').value.trim();
+  const roleModel = $('roleModelInput').value.trim() || state.model;
   const description = $('roleDescInput').value.trim();
   const instructions = $('roleInstInput').value.trim();
   const tools = [];
@@ -949,11 +998,13 @@ $('roleForm').addEventListener('submit', (event) => {
   if ($('roleToolWrite').checked) tools.push('write', 'edit', 'delete_file');
   if ($('roleToolBash').checked) tools.push('bash');
   if (!tools.length) tools.push('read', 'list_files', 'search');
+  registerModelOption(roleModel);
 
   if (state.editingRoleId) {
     const role = state.roles.find((item) => item.id === state.editingRoleId);
     if (role) {
       role.name = name;
+      role.model = roleModel;
       role.description = description;
       role.instructions = instructions;
       role.tools = tools;
@@ -964,7 +1015,7 @@ $('roleForm').addEventListener('submit', (event) => {
       name,
       description,
       instructions,
-      model: state.model === 'demo-model' ? 'hydra-gpt-mini' : state.model,
+      model: roleModel,
       enabled: true,
       tools,
     });
@@ -1013,8 +1064,130 @@ $('messages').addEventListener('click', (event) => {
   $('prompt').focus();
 });
 
+function updateTokenBadge() {
+  const badge = $('tokenBadge');
+  const ctx = state.contextTokens.toLocaleString('ru-RU');
+  const spent = state.sessionTokens.toLocaleString('ru-RU');
+  badge.textContent = state.sessionTokens > 0 ? `📊 ~${ctx} · всего ${spent} ткн` : `📊 ~${ctx} ткн`;
+}
+
+function setMode(mode) {
+  state.mode = mode === 'plan' ? 'plan' : 'act';
+  localStorage.setItem('harness.mode', state.mode);
+  const planBtn = $('modePlanBtn');
+  const actBtn = $('modeActBtn');
+  planBtn.className = state.mode === 'plan' ? 'mode-btn plan-active' : 'mode-btn';
+  actBtn.className = state.mode === 'act' ? 'mode-btn active' : 'mode-btn';
+  $('modeHint').textContent =
+    state.mode === 'plan'
+      ? 'Режим «План»: помощник только читает и планирует, файлы не меняются.'
+      : 'Режим «Действие»: помощник может менять файлы. Enter — отправить';
+}
+
+function saveTemplates() {
+  localStorage.setItem('harness.templates', JSON.stringify(state.templates));
+}
+
+function renderTemplates() {
+  const bar = $('templatesBar');
+  bar.innerHTML = '';
+  for (const tpl of state.templates) {
+    const chip = document.createElement('span');
+    chip.className = 'template-chip';
+    chip.title = tpl.prompt;
+
+    const btn = document.createElement('span');
+    btn.textContent = tpl.label;
+    btn.addEventListener('click', () => {
+      $('prompt').value = tpl.prompt;
+      $('prompt').focus();
+    });
+    chip.appendChild(btn);
+
+    if (!DEFAULT_TEMPLATES.some((d) => d.id === tpl.id)) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'template-del';
+      del.textContent = '×';
+      del.title = 'Удалить шаблон';
+      del.addEventListener('click', (event) => {
+        event.stopPropagation();
+        state.templates = state.templates.filter((item) => item.id !== tpl.id);
+        saveTemplates();
+        renderTemplates();
+      });
+      chip.appendChild(del);
+    }
+    bar.appendChild(chip);
+  }
+}
+
+$('modePlanBtn').addEventListener('click', () => setMode('plan'));
+$('modeActBtn').addEventListener('click', () => setMode('act'));
+$('saveRulesButton').addEventListener('click', () => {
+  state.rules = $('rulesInput').value.trim();
+  localStorage.setItem('harness.rules', state.rules);
+  toast('Правила проекта сохранены');
+});
+$('compactButton').addEventListener('click', async () => {
+  if (state.busy || !state.sessionId) return;
+  if (!state.demo && !state.apiKey.trim()) {
+    toast('Для сжатия нужен ключ HydraAI (или включи Демо-режим)');
+    return;
+  }
+  try {
+    const data = await api('/api/compact', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: state.sessionId,
+        apiKey: state.apiKey,
+        model: state.model,
+        demo: state.demo,
+      }),
+    });
+    if (typeof data.contextTokens === 'number') {
+      state.contextTokens = data.contextTokens;
+      updateTokenBadge();
+    }
+    if (!data.compacted) {
+      toast(data.message || 'Чат ещё короткий');
+    } else {
+      addNotice(`Чат сжат вручную: с ~${data.tokensBefore} до ~${data.tokensAfter} токенов.`);
+      toast('Чат сжат для экономии токенов');
+    }
+  } catch (error) {
+    toast(error.message);
+  }
+});
+$('addTemplateBtn').addEventListener('click', () => {
+  $('templateLabelInput').value = '';
+  $('templatePromptInput').value = '';
+  $('templateModal').hidden = false;
+  $('templateLabelInput').focus();
+});
+$('closeTemplateModal').addEventListener('click', () => { $('templateModal').hidden = true; });
+$('templateModal').addEventListener('click', (event) => {
+  if (event.target === $('templateModal')) $('templateModal').hidden = true;
+});
+$('templateForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const label = $('templateLabelInput').value.trim();
+  const prompt = $('templatePromptInput').value.trim();
+  if (!label || !prompt) return;
+  state.templates.push({ id: `tpl-${Date.now().toString(36)}`, label, prompt });
+  saveTemplates();
+  renderTemplates();
+  $('templateModal').hidden = true;
+  toast('Шаблон добавлен');
+});
+
 $('apiKey').value = state.apiKey;
 $('demoMode').checked = state.demo;
+$('rulesInput').value = state.rules;
+setMode(state.mode);
+renderTemplates();
+updateTokenBadge();
 if (state.demo) state.model = 'demo-model';
 populateSelectWithModels($('model'), state.model);
 $('modelBadge').textContent = state.demo ? 'демо-режим' : state.model;

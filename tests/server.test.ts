@@ -468,3 +468,92 @@ test('web app supports interactive ask_user SSE pause/resume and workspace websi
     await rm(sessionDir, { recursive: true, force: true });
   }
 });
+
+test('web app enforces read-only plan mode, passes project rules, tracks usage and compacts chat', async () => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), 'harness-web-plan-ws-'));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'harness-web-plan-sess-'));
+
+  const provider = new ScriptedProvider(
+    [{ type: 'text_delta', text: 'План готов.' }, { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 200, outputTokens: 50 } }],
+    [{ type: 'text_delta', text: 'Шаг 2.' }, { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 220, outputTokens: 30 } }],
+    [{ type: 'text_delta', text: 'Шаг 3.' }, { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 240, outputTokens: 20 } }],
+    [{ type: 'text_delta', text: 'Шаг 4.' }, { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 260, outputTokens: 10 } }],
+    [{ type: 'text_delta', text: 'Сжатая выжимка.' }, { type: 'done', stopReason: 'end_turn' }],
+  );
+
+  const server = createAppServer({
+    workspaceDir,
+    sessionDir,
+    webDir: path.resolve(process.cwd(), 'web'),
+    providerFactory: () => provider,
+  });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const planResp = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        prompt: 'Составь план',
+        apiKey: 'fake-key',
+        model: 'gidra-code-auto',
+        mode: 'plan',
+        rules: 'Всегда отвечай максимально просто.',
+      }),
+    });
+    assert.equal(planResp.status, 200);
+    const planEvents = (await planResp.text())
+      .split('\n\n')
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+    const planDone = planEvents.find((e: { type: string }) => e.type === 'done');
+    assert.equal(planDone.result.usage.totalTokens, 250);
+    assert.equal(planDone.result.sessionUsage.totalTokens, 250);
+    assert.ok(planDone.result.contextTokens > 0);
+
+    // Plan mode must strip write/edit/delete_file/bash tools.
+    const toolNames = provider.requests[0]!.tools.map((t) => t.name);
+    assert.ok(!toolNames.includes('write'));
+    assert.ok(!toolNames.includes('edit'));
+    assert.ok(!toolNames.includes('delete_file'));
+    assert.ok(!toolNames.includes('bash'));
+    assert.ok(toolNames.includes('read'));
+    assert.ok(toolNames.includes('list_files'));
+    assert.ok(toolNames.includes('ask_user'));
+
+    const sysMsg = (provider.requests[0]!.messages as Array<{ role: string; content: string }>).find(
+      (m) => m.role === 'system',
+    );
+    assert.match(sysMsg?.content ?? '', /Всегда отвечай максимально просто/);
+    assert.match(sysMsg?.content ?? '', /РЕЖИМ «ТОЛЬКО ПЛАН»/);
+
+    const sessionId = planDone.result.sessionId as string;
+    for (const prompt of ['Сообщение 2', 'Сообщение 3', 'Сообщение 4']) {
+      const r = await fetch(`${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, apiKey: 'fake-key', model: 'gidra-code-auto', sessionId }),
+      });
+      await r.text();
+    }
+
+    const sessionResp = await fetch(`${base}/api/session?id=${encodeURIComponent(sessionId)}`);
+    const sessionJson = (await sessionResp.json()) as { session: { usage: { totalTokens: number } } };
+    assert.equal(sessionJson.session.usage.totalTokens, 1030);
+
+    const compactResp = await fetch(`${base}/api/compact`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, apiKey: 'fake-key', model: 'gidra-code-auto' }),
+    });
+    assert.equal(compactResp.status, 200);
+    const compactJson = (await compactResp.json()) as { compacted: boolean; removedMessages: number };
+    assert.equal(compactJson.compacted, true);
+    assert.ok(compactJson.removedMessages >= 1);
+  } finally {
+    await close(server);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
+  }
+});

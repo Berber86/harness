@@ -8,6 +8,8 @@ export interface ContextOptions {
   /** Number of most recent messages always kept verbatim. Default: 6. */
   keepRecent?: number;
   enabled?: boolean;
+  /** Compact older messages even when total tokens are below maxTokens. */
+  force?: boolean;
 }
 
 export interface CompactionResult {
@@ -62,7 +64,7 @@ export async function compactIfNeeded(
   if (options.enabled === false) return null;
   const maxTokens = options.maxTokens ?? 16_000;
   const tokensBefore = estimateSessionTokens(session);
-  if (tokensBefore <= maxTokens) return null;
+  if (!options.force && tokensBefore <= maxTokens) return null;
 
   let leadingSystem = 0;
   while (session.messages[leadingSystem]?.role === 'system') leadingSystem++;

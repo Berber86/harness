@@ -55,6 +55,14 @@
       </section>
 
       <section class="side-section">
+        <div class="section-header">
+          <div class="section-title">Правила проекта</div>
+          <button id="saveRulesButton" type="button" class="mini-button">Сохранить</button>
+        </div>
+        <textarea id="rulesInput" class="field rules-textarea" rows="2" placeholder="Например: пиши простой код и объясняй по-русски"></textarea>
+      </section>
+
+      <section class="side-section">
         <div class="section-title">Мои чаты</div>
         <div id="sessionList" class="list"><div class="empty-small">Пока нет чатов</div></div>
       </section>
@@ -78,6 +86,8 @@
           <div class="chat-subtitle">Попроси что-то сделать — я покажу, что получилось</div>
         </div>
         <div class="header-badges">
+          <div id="tokenBadge" class="badge badge-soft" title="Оценка текущего контекста / всего потрачено в этом чате">📊 0 ткн</div>
+          <button id="compactButton" type="button" class="mini-button" title="Сжать старые сообщения чата для экономии токенов" hidden>🗜 Сжать чат</button>
           <div id="teamBadge" class="badge badge-soft">Команда: 0</div>
           <div id="modelBadge" class="badge">gidra-code-auto</div>
         </div>
@@ -97,9 +107,17 @@
       </div>
 
       <form id="composerForm" class="composer">
+        <div class="composer-top">
+          <div class="mode-switch" role="group" aria-label="Режим работы">
+            <button type="button" id="modePlanBtn" class="mode-btn" data-mode="plan" title="Только чтение и план, без изменения файлов">🧭 План</button>
+            <button type="button" id="modeActBtn" class="mode-btn active" data-mode="act" title="Меняет файлы и запускает проверки">⚡ Действие</button>
+          </div>
+          <div id="templatesBar" class="templates-bar"></div>
+          <button type="button" id="addTemplateBtn" class="mini-button" title="Добавить свой шаблон запроса">＋ Шаблон</button>
+        </div>
         <textarea id="prompt" rows="2" placeholder="Напиши задачу простыми словами…"></textarea>
         <div class="composer-actions">
-          <span class="hint">Enter — отправить, Shift+Enter — новая строка</span>
+          <span id="modeHint" class="hint">Режим «Действие»: помощник может менять файлы. Enter — отправить</span>
           <button type="button" id="stopButton" class="button button-danger" hidden>Остановить</button>
           <button type="submit" id="sendButton" class="button button-primary">Отправить ➤</button>
         </div>
@@ -164,6 +182,26 @@
         <div class="modal-actions">
           <button type="button" id="deleteRoleButton" class="button button-danger">Удалить</button>
           <button type="submit" class="button button-primary">Сохранить роль</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="templateModal" class="modal" hidden>
+    <div class="modal-window modal-small">
+      <div class="modal-header">
+        <span>Новый шаблон запроса</span>
+        <button id="closeTemplateModal" type="button" class="button button-secondary">Закрыть</button>
+      </div>
+      <form id="templateForm" class="modal-body">
+        <label class="field-label" for="templateLabelInput">Короткое название кнопки</label>
+        <input id="templateLabelInput" class="field" type="text" required placeholder="Например: 🧪 Напиши тесты">
+
+        <label class="field-label" for="templatePromptInput">Текст запроса</label>
+        <textarea id="templatePromptInput" class="field" rows="3" required placeholder="Что вставить в поле ввода при нажатии"></textarea>
+
+        <div class="modal-actions">
+          <button type="submit" class="button button-primary">Сохранить шаблон</button>
         </div>
       </form>
     </div>

@@ -7,9 +7,15 @@ import {
   FileSessionStore,
   Session,
   buildLeadSystemPrompt,
+  compactIfNeeded,
   createAskUserTool,
   createDefaultTools,
   createDelegateTool,
+  createFetchPageTool,
+  createListFilesTool,
+  createReadTool,
+  createSearchTool,
+  estimateSessionTokens,
   newId,
   openaiCompatibleProvider,
   resolveWithin,
@@ -23,6 +29,7 @@ import type {
   ModelProvider,
   RoleToolName,
   Tool,
+  Usage,
 } from '../index.js';
 import { buildZip } from './zip.js';
 
@@ -194,17 +201,15 @@ function createDemoProvider(activeRoles: AgentRole[] = []): ModelProvider {
         yield { type: 'done', stopReason: 'tool_use' };
       } else {
         const createdSite = messages.some((m) => m.toolCalls?.some((c) => c.arguments?.path === 'index.html'));
-        for (const part of [
-          'Готово! ',
-          createdSite
-            ? 'Я создал мини-сайт index.html в папке workspace. Нажми «🌐 Сайт» слева, чтобы открыть его в браузере!'
-            : canWrite
-              ? 'Я создал файл demo-note.txt в папке workspace. Нажми «Откатить», чтобы увидеть, как работает отмена.'
-              : 'Я проверил файл README.txt в папке workspace.',
-        ]) {
+        const reply = !canWrite
+          ? formatDemoPlanReply()
+          : createdSite
+            ? 'Готово! Я создал мини-сайт index.html в папке workspace. Нажми «🌐 Сайт» слева, чтобы открыть его в браузере!'
+            : 'Готово! Я создал файл demo-note.txt в папке workspace. Нажми «Откатить», чтобы увидеть, как работает отмена.';
+        for (const part of [reply]) {
           yield { type: 'text_delta', text: part };
         }
-        yield { type: 'done', stopReason: 'end_turn' };
+        yield { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 120, outputTokens: 45 } };
       }
     },
   };
@@ -218,6 +223,33 @@ interface IncomingRole {
   model?: string;
   enabled?: boolean;
   tools?: unknown;
+}
+
+const READ_ONLY_ROLE_TOOLS = new Set<RoleToolName>(['read', 'list_files', 'search', 'fetch_page']);
+
+function getSessionUsage(session: Session): { inputTokens: number; outputTokens: number; totalTokens: number } {
+  const raw = session.metadata.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+  const inputTokens = Number(raw?.inputTokens ?? 0);
+  const outputTokens = Number(raw?.outputTokens ?? 0);
+  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
+function addSessionUsage(session: Session, delta: Usage | undefined) {
+  const prev = getSessionUsage(session);
+  const inputTokens = prev.inputTokens + Number(delta?.inputTokens ?? 0);
+  const outputTokens = prev.outputTokens + Number(delta?.outputTokens ?? 0);
+  session.metadata.usage = { inputTokens, outputTokens };
+  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
+function formatDemoPlanReply(): string {
+  return [
+    'Готово! Вот пошаговый план (режим **«Только план»** — файлы не менялись):',
+    '1. Проверить текущие файлы в `workspace`.',
+    '2. Создать или обновить нужные файлы.',
+    '3. Проверить результат.',
+    'Переключи режим на **«⚡ Действие»**, и я сразу выполню этот план!',
+  ].join('\n');
 }
 
 const VALID_ROLE_TOOLS = new Set<RoleToolName>([
@@ -437,6 +469,8 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       model?: string;
       sessionId?: string;
       demo?: boolean;
+      mode?: 'plan' | 'act';
+      rules?: string;
       roles?: IncomingRole[];
     };
     try {
@@ -450,9 +484,24 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       return;
     }
 
+    const mode: 'plan' | 'act' = body.mode === 'plan' ? 'plan' : 'act';
+    const projectRules = typeof body.rules === 'string' ? body.rules.trim().slice(0, 2000) : '';
     const leadModel = body.model?.trim() || 'demo-model';
     const allRoles = normalizeRoles(body.roles, leadModel);
-    const activeRoles = allRoles.filter((role) => role.enabled);
+    const activeRoles = allRoles
+      .filter((role) => role.enabled)
+      .map((role) => {
+        const instructions = projectRules
+          ? `${role.instructions}\n\nПравила проекта от пользователя:\n${projectRules}`
+          : role.instructions;
+        if (mode !== 'plan') return { ...role, instructions };
+        const readTools = (role.tools ?? []).filter((t) => READ_ONLY_ROLE_TOOLS.has(t));
+        return {
+          ...role,
+          instructions: `${instructions}\n\nСейчас режим ТОЛЬКО ПЛАН: ничего не меняй, только анализируй.`,
+          tools: readTools.length ? readTools : (['read', 'list_files', 'search'] as RoleToolName[]),
+        };
+      });
 
     const resolveModelProvider = (modelName: string): ModelProvider =>
       body.demo
@@ -499,7 +548,11 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       });
     });
 
-    const tools: Tool[] = [...createDefaultTools(), askUserTool];
+    const baseTools: Tool[] =
+      mode === 'plan'
+        ? [createReadTool(), createListFilesTool(), createSearchTool(), createFetchPageTool()]
+        : createDefaultTools();
+    const tools: Tool[] = [...baseTools, askUserTool];
     if (activeRoles.length) {
       tools.push(
         createDelegateTool({
@@ -530,13 +583,22 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       );
     }
 
+    let effectivePrompt = buildLeadSystemPrompt(systemPrompt, activeRoles);
+    if (projectRules) {
+      effectivePrompt += `\n\nПравила проекта от пользователя (всегда соблюдай):\n${projectRules}`;
+    }
+    if (mode === 'plan') {
+      effectivePrompt +=
+        '\n\nРЕЖИМ «ТОЛЬКО ПЛАН»: сейчас запрещено менять или удалять файлы и запускать команды. Изучи проект доступными инструментами чтения, при необходимости уточни детали через ask_user и составь понятный пошаговый план. В конце предложи пользователю переключиться в режим «Действие», чтобы приступить к выполнению.';
+    }
+
     const agent = new Agent({
       model: { provider: 'hydra', model: leadModel, maxTokens: 4096 },
       provider,
       tools,
       session,
       cwd: workspaceDir,
-      systemPrompt: buildLeadSystemPrompt(systemPrompt, activeRoles),
+      systemPrompt: effectivePrompt,
       maxTurns: 12,
       context: { maxTokens: 32_000, keepRecent: 6 },
     });
@@ -605,6 +667,13 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             break;
           case 'done': {
             const last = session.checkpoints.at(-1);
+            const runUsage = {
+              inputTokens: event.result.usage.inputTokens ?? 0,
+              outputTokens: event.result.usage.outputTokens ?? 0,
+              totalTokens: (event.result.usage.inputTokens ?? 0) + (event.result.usage.outputTokens ?? 0),
+            };
+            const sessionUsage = addSessionUsage(session, event.result.usage);
+            await session.save();
             sendSse(res, {
               type: 'done',
               result: {
@@ -613,6 +682,9 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
                 stopReason: event.result.stopReason,
                 checkpointId: event.result.checkpointId,
                 changes: last ? publicCheckpoint(last).changes : [],
+                usage: runUsage,
+                sessionUsage,
+                contextTokens: estimateSessionTokens(session),
               },
               files: await listFiles(),
             });
@@ -657,6 +729,8 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
                     tools: message.toolCalls?.map((call) => call.name) ?? [],
                   })),
                   checkpoints: session.checkpoints.map(publicCheckpoint),
+                  usage: getSessionUsage(session),
+                  contextTokens: estimateSessionTokens(session),
                 },
               });
               return;
@@ -736,6 +810,56 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             sendJson(res, 200, { ok: true });
             return;
           }
+          case '/api/compact': {
+            const body = JSON.parse(await readBody(req)) as {
+              sessionId?: string;
+              apiKey?: string;
+              model?: string;
+              demo?: boolean;
+            };
+            const session = body.sessionId ? await Session.load(body.sessionId, store) : null;
+            if (!session) {
+              sendJson(res, 404, { error: 'Чат не найден' });
+              return;
+            }
+            const modelName = body.model?.trim() || 'demo-model';
+            const compactProvider: ModelProvider = body.demo
+              ? {
+                  name: 'demo-compact',
+                  async *chat() {
+                    yield {
+                      type: 'text_delta',
+                      text: 'Краткая выжимка предыдущей части разговора (демо-сжатие).',
+                    };
+                    yield { type: 'done', stopReason: 'end_turn' };
+                  },
+                }
+              : options.providerFactory
+                ? options.providerFactory({ apiKey: body.apiKey ?? '', baseURL, model: modelName })
+                : openaiCompatibleProvider({ apiKey: body.apiKey ?? '', baseURL });
+            const result = await compactIfNeeded(
+              session,
+              compactProvider,
+              { provider: 'hydra', model: modelName, maxTokens: 1024 },
+              { force: true, keepRecent: 4, enabled: true },
+            );
+            if (!result) {
+              sendJson(res, 200, {
+                compacted: false,
+                contextTokens: estimateSessionTokens(session),
+                message: 'Чат ещё короткий — сжимать пока нечего.',
+              });
+              return;
+            }
+            sendJson(res, 200, {
+              compacted: true,
+              removedMessages: result.removedMessages,
+              tokensBefore: result.tokensBefore,
+              tokensAfter: result.tokensAfter,
+              contextTokens: result.tokensAfter,
+            });
+            return;
+          }
           case '/api/rollback': {
             const body = JSON.parse(await readBody(req)) as { sessionId?: string; checkpointId?: string };
             const session = body.sessionId ? await Session.load(body.sessionId, store) : null;
@@ -747,6 +871,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             sendJson(res, 200, {
               checkpoint: publicCheckpoint(checkpoint),
               messages: session.messages.length,
+              contextTokens: estimateSessionTokens(session),
               files: await listFiles(),
             });
             return;

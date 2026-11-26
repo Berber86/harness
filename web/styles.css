@@ -265,3 +265,49 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
   .sidebar { max-height: 320px; }
   .chat { min-height: 70vh; }
 }
+
+.skills-bar-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px;
+}
+.skills-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.skills-bar { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.skill-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid #d9d6fe; background: #f5f3ff; color: #3b2fb8;
+  border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.skill-chip:hover { border-color: var(--accent); background: #ede9fe; }
+.skill-edit-btn {
+  border: none; background: transparent; color: #7c75c9; cursor: pointer;
+  padding: 0 2px; font-size: 11px; line-height: 1;
+}
+.skill-edit-btn:hover { color: #2b208f; }
+
+.prompt-card {
+  margin: 12px 0 6px;
+  border: 1.5px solid #c7c2ff;
+  background: linear-gradient(180deg, #faf9ff 0%, #f3f1ff 100%);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.prompt-card-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--accent); margin-bottom: 6px;
+}
+.prompt-card-text {
+  margin: 0; white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.55;
+  background: white; border: 1px solid #e3e0ff; border-radius: 8px; padding: 10px 12px; color: var(--text);
+}
+.prompt-card-actions {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px;
+}
+.prompt-card-btn {
+  border: 1px solid var(--border); background: white; color: var(--text);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.prompt-card-btn:hover { border-color: var(--accent); color: var(--accent); }
+.prompt-card-btn.primary {
+  background: var(--accent); border-color: var(--accent); color: white;
+}
+.prompt-card-btn.primary:hover { background: #453be0; color: white; }
+

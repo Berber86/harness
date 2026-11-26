@@ -99,6 +99,7 @@
           <h1>Привет! Я помогу тебе с кодом</h1>
           <p>Напиши, что нужно сделать. Я буду работать только в папке <code>workspace</code> и покажу каждое действие. Если что-то не понравится — нажмёшь «Откатить».</p>
           <div class="examples">
+            <button class="example" data-prompt="/reframe хочу сделать мини-приложение для учёта привычек">🧠 Разобрать идею (/reframe)</button>
             <button class="example" data-prompt="Спроси меня с вариантами, какой мини-проект создать">Спроси с вариантами</button>
             <button class="example" data-prompt="Создай файл example.py с простой функцией сложения двух чисел">Создай файл с функцией</button>
             <button class="example" data-prompt="Посмотри файлы в песочнице и объясни, что там лежит">Что есть в песочнице?</button>
@@ -115,7 +116,12 @@
           <div id="templatesBar" class="templates-bar"></div>
           <button type="button" id="addTemplateBtn" class="mini-button" title="Добавить свой шаблон запроса">＋ Шаблон</button>
         </div>
-        <textarea id="prompt" rows="2" placeholder="Напиши задачу простыми словами…"></textarea>
+        <div class="skills-bar-row">
+          <span class="skills-label" title="Навыки из папки skills/ (как в pstack и Pi)">Навыки:</span>
+          <div id="skillsBar" class="skills-bar"></div>
+          <button type="button" id="addSkillBtn" class="mini-button" title="Создать новый навык в папке skills/">＋ Навык</button>
+        </div>
+        <textarea id="prompt" rows="2" placeholder="Напиши задачу простыми словами или вызови /reframe, /sharpen…"></textarea>
         <div class="composer-actions">
           <span id="modeHint" class="hint">Режим «Действие»: помощник может менять файлы. Enter — отправить</span>
           <button type="button" id="stopButton" class="button button-danger" hidden>Остановить</button>
@@ -202,6 +208,42 @@
 
         <div class="modal-actions">
           <button type="submit" class="button button-primary">Сохранить шаблон</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="skillModal" class="modal" hidden>
+    <div class="modal-window modal-small">
+      <div class="modal-header">
+        <span id="skillModalTitle">Навык (папка skills/)</span>
+        <button id="closeSkillModal" type="button" class="button button-secondary">Закрыть</button>
+      </div>
+      <form id="skillForm" class="modal-body">
+        <label class="field-label" for="skillNameInput">Команда латиницей (после /)</label>
+        <input id="skillNameInput" class="field" type="text" required pattern="[a-z0-9][a-z0-9-]*" placeholder="Например: my-check">
+
+        <label class="field-label" for="skillTitleInput">Понятное название кнопки</label>
+        <input id="skillTitleInput" class="field" type="text" required placeholder="Например: Проверить тексты">
+
+        <label class="field-label" for="skillIconInput">Значок (эмодзи)</label>
+        <input id="skillIconInput" class="field" type="text" maxlength="4" value="🪄" placeholder="🪄">
+
+        <label class="field-label" for="skillDescInput">Короткая подсказка</label>
+        <input id="skillDescInput" class="field" type="text" placeholder="Что делает этот навык">
+
+        <label class="field-label" for="skillModeInput">Режим при запуске</label>
+        <select id="skillModeInput" class="field">
+          <option value="plan">🧭 План (безопасный, файлы не меняет)</option>
+          <option value="act">⚡ Действие (может менять файлы)</option>
+        </select>
+
+        <label class="field-label" for="skillInstInput">Инструкция навыка (Markdown)</label>
+        <textarea id="skillInstInput" class="field" rows="6" required placeholder="Подробно опиши, как помощник должен разобрать или выполнить задачу…"></textarea>
+
+        <div class="modal-actions">
+          <button type="button" id="deleteSkillButton" class="button button-danger" hidden>Удалить</button>
+          <button type="submit" class="button button-primary">Сохранить в skills/</button>
         </div>
       </form>
     </div>

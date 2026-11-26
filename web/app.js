@@ -121,6 +121,9 @@ const state = {
   roles: loadStoredRoles(),
   modelOptions: mergeCustomStoredModels(loadStoredModels()),
   editingRoleId: null,
+  skills: [],
+  editingSkillName: null,
+  lastRefinedPrompt: '',
 };
 
 function toast(message) {
@@ -155,7 +158,24 @@ function renderMarkdown(text) {
   return escapeHtml(text)
     .split('```')
     .map((part, index) => {
-      if (index % 2 === 1) return `<pre><code>${part.replace(/^\w+\n/, '').replace(/^\n/, '')}</code></pre>`;
+      if (index % 2 === 1) {
+        if (/^prompt\s*\n/i.test(part)) {
+          const clean = part.replace(/^prompt\s*\n/i, '').trim();
+          state.lastRefinedPrompt = clean.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+          return [
+            '<div class="prompt-card">',
+            '<div class="prompt-card-title">✨ Готовый улучшенный запрос</div>',
+            `<div class="prompt-card-text">${clean}</div>`,
+            '<div class="prompt-card-actions">',
+            '<button type="button" class="prompt-card-btn" data-prompt-action="use">📋 Вставить в поле</button>',
+            '<button type="button" class="prompt-card-btn" data-prompt-action="sharpen">🎯 Углубить через /sharpen</button>',
+            '<button type="button" class="prompt-card-btn primary" data-prompt-action="run">⚡ Запустить в Действии</button>',
+            '</div>',
+            '</div>',
+          ].join('');
+        }
+        return `<pre><code>${part.replace(/^\w+\n/, '').replace(/^\n/, '')}</code></pre>`;
+      }
       return part.split('\n').map(formatInline).join('<br>');
     })
     .join('');
@@ -292,6 +312,13 @@ async function sendMessage(promptText) {
           state.sessionId = event.sessionId;
           $('compactButton').hidden = false;
           markActiveSession();
+          break;
+        case 'skill':
+          appendActivity(
+            assistant.activity,
+            `${event.skill.icon} Навык /${event.skill.name} — ${event.skill.title}`,
+            event.skill.mode === 'plan' ? 'Включён безопасный режим без изменения файлов' : '',
+          );
           break;
         case 'text':
           fullText += event.text;
@@ -1058,6 +1085,27 @@ $('rollbackButton').addEventListener('click', async () => {
   }
 });
 $('messages').addEventListener('click', (event) => {
+  const promptBtn = event.target.closest('.prompt-card-btn');
+  if (promptBtn) {
+    const card = promptBtn.closest('.prompt-card');
+    const promptText = card?.querySelector('.prompt-card-text')?.textContent?.trim();
+    if (!promptText) return;
+    const action = promptBtn.dataset.promptAction;
+    if (action === 'use') {
+      $('prompt').value = promptText;
+      $('prompt').focus();
+      toast('Новый запрос вставлен в поле ввода');
+    } else if (action === 'sharpen') {
+      $('prompt').value = `/sharpen ${promptText}`;
+      $('prompt').focus();
+      toast('Готово для /sharpen — нажми «Отправить»');
+    } else if (action === 'run') {
+      setMode('act');
+      $('prompt').value = promptText;
+      sendMessage(promptText);
+    }
+    return;
+  }
   const button = event.target.closest('.example');
   if (!button) return;
   $('prompt').value = button.dataset.prompt;
@@ -1182,6 +1230,111 @@ $('templateForm').addEventListener('submit', (event) => {
   toast('Шаблон добавлен');
 });
 
+async function loadSkills() {
+  try {
+    const data = await api('/api/skills');
+    state.skills = Array.isArray(data.skills) ? data.skills : [];
+    renderSkills();
+  } catch {
+    // ignore if offline
+  }
+}
+
+function renderSkills() {
+  const bar = $('skillsBar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  for (const skill of state.skills) {
+    const chip = document.createElement('span');
+    chip.className = 'skill-chip';
+    chip.title = `${skill.description || skill.title} (режим: ${skill.mode === 'plan' ? 'только план' : 'действие'})`;
+
+    const label = document.createElement('span');
+    label.textContent = `${skill.icon} /${skill.name} · ${skill.title}`;
+    label.addEventListener('click', () => {
+      const current = $('prompt').value.trim().replace(/^\/[a-z0-9-]+\s*/i, '').trim();
+      const prefill = current || (skill.name === 'sharpen' && state.lastRefinedPrompt ? state.lastRefinedPrompt : '');
+      $('prompt').value = prefill ? `/${skill.name} ${prefill}` : `/${skill.name} `;
+      $('prompt').focus();
+      if (!prefill) {
+        toast(`Напиши свою идею после /${skill.name} и нажми «Отправить»`);
+      }
+    });
+    chip.appendChild(label);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'skill-edit-btn';
+    editBtn.textContent = '✎';
+    editBtn.title = `Настроить /${skill.name} (skills/${skill.filePath})`;
+    editBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openSkillModal(skill);
+    });
+    chip.appendChild(editBtn);
+
+    bar.appendChild(chip);
+  }
+}
+
+function openSkillModal(skill = null) {
+  state.editingSkillName = skill?.name ?? null;
+  $('skillModalTitle').textContent = skill ? `Навык /${skill.name}` : 'Новый навык (skills/)';
+  $('skillNameInput').value = skill?.name ?? '';
+  $('skillNameInput').disabled = Boolean(skill);
+  $('skillTitleInput').value = skill?.title ?? '';
+  $('skillIconInput').value = skill?.icon ?? '🪄';
+  $('skillDescInput').value = skill?.description ?? '';
+  $('skillModeInput').value = skill?.mode === 'act' ? 'act' : 'plan';
+  $('skillInstInput').value = skill?.instructions ?? '';
+  $('deleteSkillButton').hidden = !skill;
+  $('skillModal').hidden = false;
+  (skill ? $('skillTitleInput') : $('skillNameInput')).focus();
+}
+
+$('addSkillBtn').addEventListener('click', () => openSkillModal(null));
+$('closeSkillModal').addEventListener('click', () => { $('skillModal').hidden = true; });
+$('skillModal').addEventListener('click', (event) => {
+  if (event.target === $('skillModal')) $('skillModal').hidden = true;
+});
+$('deleteSkillButton').addEventListener('click', async () => {
+  if (!state.editingSkillName) return;
+  if (!confirm(`Удалить навык /${state.editingSkillName}?`)) return;
+  try {
+    const data = await api(`/api/skills?name=${encodeURIComponent(state.editingSkillName)}`, { method: 'DELETE' });
+    state.skills = data.skills ?? [];
+    renderSkills();
+    $('skillModal').hidden = true;
+    toast(`Навык /${state.editingSkillName} удалён`);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+$('skillForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const payload = {
+    name: state.editingSkillName || $('skillNameInput').value.trim().toLowerCase(),
+    title: $('skillTitleInput').value.trim(),
+    icon: $('skillIconInput').value.trim() || '🪄',
+    description: $('skillDescInput').value.trim(),
+    mode: $('skillModeInput').value === 'act' ? 'act' : 'plan',
+    instructions: $('skillInstInput').value.trim(),
+  };
+  try {
+    const data = await api('/api/skills', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    state.skills = data.skills ?? [];
+    renderSkills();
+    $('skillModal').hidden = true;
+    toast(`Навык /${data.skill.name} сохранён в skills/`);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
 $('apiKey').value = state.apiKey;
 $('demoMode').checked = state.demo;
 $('rulesInput').value = state.rules;
@@ -1199,5 +1352,6 @@ if (state.demo) {
   $('connectionStatus').textContent = 'Ключ сохранён в этом браузере';
 }
 renderRoles();
+loadSkills();
 loadFiles();
 loadSessions();

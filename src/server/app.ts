@@ -7,6 +7,7 @@ import {
   FileSessionStore,
   Session,
   buildLeadSystemPrompt,
+  buildSkillSystemPrompt,
   compactIfNeeded,
   createAskUserTool,
   createDefaultTools,
@@ -15,11 +16,15 @@ import {
   createListFilesTool,
   createReadTool,
   createSearchTool,
+  deleteSkill,
   estimateSessionTokens,
+  loadSkills,
+  matchSkillInvocation,
   newId,
   openaiCompatibleProvider,
   resolveWithin,
   rollbackToCheckpoint,
+  saveSkill,
 } from '../index.js';
 import type {
   AgentRole,
@@ -28,6 +33,7 @@ import type {
   Checkpoint,
   ModelProvider,
   RoleToolName,
+  SkillMode,
   Tool,
   Usage,
 } from '../index.js';
@@ -46,6 +52,7 @@ export interface AppServerOptions {
   workspaceDir?: string;
   sessionDir?: string;
   webDir?: string;
+  skillsDir?: string;
   baseURL?: string;
   systemPrompt?: string;
   providerFactory?: (options: { apiKey: string; baseURL: string; model: string }) => ModelProvider;
@@ -87,7 +94,48 @@ function createDemoProvider(activeRoles: AgentRole[] = []): ModelProvider {
       const hasAsk = tools.some((tool) => tool.name === 'ask_user');
       const hasDelegate = tools.some((tool) => tool.name === 'delegate');
       const canWrite = tools.some((tool) => tool.name === 'write');
+      const systemText = messages.find((message) => message.role === 'system')?.content ?? '';
       const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+      const activeSkillMatch = systemText.match(/\[АКТИВНЫЙ НАВЫК: \/([a-z0-9-]+)/i);
+
+      if (activeSkillMatch) {
+        const skillName = activeSkillMatch[1]!.toLowerCase();
+        const userIdea = (lastUser?.content ?? '').replace(/^\/[a-z0-9-]+\s*/i, '').trim() || 'сделать удобный сайт в песочнице';
+        const demoReply =
+          skillName === 'reframe'
+            ? [
+                `Вот разбор твоей идеи («${userIdea}») на языке профи (демо-пример):`,
+                '',
+                '1. **Ключевые термины (что сильнее всего влияет на результат):**',
+                '   - **Недеструктивное редактирование (Non-destructive editing)** — все изменения хранятся как список правок поверх исходника, чтобы можно было откатить любой шаг (так устроено и в FFmpeg/Shotcut).',
+                '   - **Идемпотентность (Idempotency)** — повторный запуск кнопки даёт тот же безопасный результат без дублей.',
+                '   - **Разделение состояния и отображения (State vs View)** — сначала чёткие данные, потом уже красивая картинка.',
+                '2. **Из соседних областей:** в бухгалтерии это называется *журнал транзакций (ledger)* — вместо стирания старой цифры дописывается новая запись.',
+                '3. **Что важно не забыть:** заранее продумать пустое состояние, откат ошибок и проверку результата на реальном файле.',
+                '',
+                '```prompt',
+                `Сделай прототип для задачи: ${userIdea}. Используй недеструктивное редактирование (с возможностью отката через чекпоинты), отдели хранение данных от интерфейса и добавь проверку граничных случаев.`,
+                '```',
+              ].join('\n')
+            : skillName === 'sharpen'
+              ? [
+                  `Углубляем задачу «${userIdea}» (демо-пример):`,
+                  '',
+                  '1. **Что сделал бы профи, о чём не просили:** добавил бы простую проверку крайних случаев (пустой ввод, ошибка сохранения) и быструю автопроверку.',
+                  '2. **Самый сырой исходный материал:** реальные данные/файлы из папки `workspace`, а не выдуманные примеры.',
+                  '3. **Методы и инструменты:** минимальный рабочий прототип + быстрая проверка поведения.',
+                  '4. **Внешняя проверка результата:** тест или реальный прогон сценария, а не просто «выглядит красиво».',
+                  '',
+                  '```prompt',
+                  `Реализуй задачу «${userIdea}» с опорой на реальные файлы проекта. Для спорных технических решений сначала сделай мини-прототип и порекомендуй лучший вариант по фактам, а вкусовые и продуктовые решения спроси у меня через варианты ответа. В конце проверь результат реальным тестом.`,
+                  '```',
+                ].join('\n')
+              : `Навык /${skillName} выполнен в безопасном режиме анализа (демо-ответ для: «${userIdea}»).`;
+        yield { type: 'text_delta', text: demoReply };
+        yield { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 90, outputTokens: 110 } };
+        return;
+      }
+
       const wantsQuestion = /вопрос|спроси|вариант/i.test(lastUser?.content ?? '');
       const toolResults = messages.flatMap((message) => message.toolResults ?? []);
       const askResult = toolResults.find((res) => res.name === 'ask_user');
@@ -317,6 +365,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
   const workspaceDir = options.workspaceDir ?? path.resolve(process.cwd(), 'workspace');
   const sessionDir = options.sessionDir ?? path.resolve(process.cwd(), '.harness', 'sessions');
   const webDir = options.webDir ?? path.resolve(process.cwd(), 'web');
+  const skillsDir = options.skillsDir ?? path.resolve(process.cwd(), 'skills');
   const baseURL = (options.baseURL ?? process.env.HYDRA_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   const systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const store = new FileSessionStore(sessionDir);
@@ -471,6 +520,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       demo?: boolean;
       mode?: 'plan' | 'act';
       rules?: string;
+      skill?: string;
       roles?: IncomingRole[];
     };
     try {
@@ -484,7 +534,10 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       return;
     }
 
-    const mode: 'plan' | 'act' = body.mode === 'plan' ? 'plan' : 'act';
+    const availableSkills = await loadSkills(skillsDir);
+    const skillInvocation = matchSkillInvocation(body.prompt, availableSkills, body.skill);
+    const requestedMode: 'plan' | 'act' = body.mode === 'plan' ? 'plan' : 'act';
+    const mode: 'plan' | 'act' = skillInvocation?.skill.mode === 'plan' ? 'plan' : requestedMode;
     const projectRules = typeof body.rules === 'string' ? body.rules.trim().slice(0, 2000) : '';
     const leadModel = body.model?.trim() || 'demo-model';
     const allRoles = normalizeRoles(body.roles, leadModel);
@@ -587,7 +640,10 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
     if (projectRules) {
       effectivePrompt += `\n\nПравила проекта от пользователя (всегда соблюдай):\n${projectRules}`;
     }
-    if (mode === 'plan') {
+    if (skillInvocation) {
+      effectivePrompt += `\n\n${buildSkillSystemPrompt(skillInvocation.skill)}`;
+    }
+    if (mode === 'plan' && !skillInvocation) {
       effectivePrompt +=
         '\n\nРЕЖИМ «ТОЛЬКО ПЛАН»: сейчас запрещено менять или удалять файлы и запускать команды. Изучи проект доступными инструментами чтения, при необходимости уточни детали через ask_user и составь понятный пошаговый план. В конце предложи пользователю переключиться в режим «Действие», чтобы приступить к выполнению.';
     }
@@ -610,6 +666,17 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       'x-accel-buffering': 'no',
     });
     sendSse(res, { type: 'started', sessionId: session.id });
+    if (skillInvocation) {
+      sendSse(res, {
+        type: 'skill',
+        skill: {
+          name: skillInvocation.skill.name,
+          title: skillInvocation.skill.title,
+          icon: skillInvocation.skill.icon,
+          mode: skillInvocation.skill.mode,
+        },
+      });
+    }
 
     try {
       for await (const event of agent.stream(body.prompt, { signal: controller.signal })) {
@@ -779,6 +846,9 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             case '/api/roles':
               sendJson(res, 200, { roles: DEFAULT_ROLE_PRESETS });
               return;
+            case '/api/skills':
+              sendJson(res, 200, { skills: await loadSkills(skillsDir) });
+              return;
           }
         }
         if (url.pathname === '/preview' || url.pathname.startsWith('/preview/')) {
@@ -876,8 +946,44 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             });
             return;
           }
+          case '/api/skills': {
+            const body = JSON.parse(await readBody(req)) as {
+              name?: string;
+              title?: string;
+              icon?: string;
+              description?: string;
+              mode?: SkillMode;
+              instructions?: string;
+            };
+            try {
+              const skill = await saveSkill(skillsDir, {
+                name: body.name ?? '',
+                title: body.title,
+                icon: body.icon,
+                description: body.description,
+                mode: body.mode === 'act' ? 'act' : 'plan',
+                instructions: body.instructions ?? '',
+              });
+              sendJson(res, 200, { skill, skills: await loadSkills(skillsDir) });
+            } catch (error) {
+              sendJson(res, 400, { error: (error as Error).message });
+            }
+            return;
+          }
         }
       }
+
+      if (req.method === 'DELETE' && url.pathname === '/api/skills') {
+        try {
+          const name = url.searchParams.get('name') ?? '';
+          const deleted = await deleteSkill(skillsDir, name);
+          sendJson(res, 200, { deleted, skills: await loadSkills(skillsDir) });
+        } catch (error) {
+          sendJson(res, 400, { error: (error as Error).message });
+        }
+        return;
+      }
+
       sendJson(res, 404, { error: 'Неизвестный адрес' });
     } catch (error) {
       if (!res.headersSent) sendJson(res, 500, { error: (error as Error).message });

@@ -557,3 +557,86 @@ test('web app enforces read-only plan mode, passes project rules, tracks usage a
     await rm(sessionDir, { recursive: true, force: true });
   }
 });
+
+test('web app loads skills/, activates /reframe in safe read-only mode, and creates/deletes custom skills', async () => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), 'harness-web-skills-ws-'));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'harness-web-skills-sess-'));
+  const skillsDir = await mkdtemp(path.join(tmpdir(), 'harness-web-skills-dir-'));
+
+  const provider = new ScriptedProvider([
+    { type: 'text_delta', text: 'Термины готовы.\n\n```prompt\nУлучшенный промпт\n```' },
+    { type: 'done', stopReason: 'end_turn', usage: { inputTokens: 150, outputTokens: 80 } },
+  ]);
+
+  const server = createAppServer({
+    workspaceDir,
+    sessionDir,
+    skillsDir,
+    webDir: path.resolve(process.cwd(), 'web'),
+    providerFactory: () => provider,
+  });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const createResp = await fetch(`${base}/api/skills`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'reframe',
+        title: 'Термины',
+        icon: '🧠',
+        description: 'Помогает назвать идею точно',
+        mode: 'plan',
+        instructions: 'Перечисли ключевые термины и перепиши запрос.',
+      }),
+    });
+    assert.equal(createResp.status, 200);
+
+    const listResp = await fetch(`${base}/api/skills`);
+    const listJson = (await listResp.json()) as { skills: Array<{ name: string }> };
+    assert.equal(listJson.skills.length, 1);
+    assert.equal(listJson.skills[0]!.name, 'reframe');
+
+    // Even when client requests mode: 'act', /reframe (mode: 'plan') must restrict tools to read-only.
+    const chatResp = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        prompt: '/reframe хочу видеоредактор',
+        apiKey: 'fake-key',
+        model: 'gidra-code-auto',
+        mode: 'act',
+      }),
+    });
+    assert.equal(chatResp.status, 200);
+    const events = (await chatResp.text())
+      .split('\n\n')
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+    const skillEv = events.find((e: { type: string }) => e.type === 'skill');
+    assert.equal(skillEv?.skill?.name, 'reframe');
+
+    const toolNames = provider.requests[0]!.tools.map((t) => t.name);
+    assert.ok(!toolNames.includes('write'));
+    assert.ok(!toolNames.includes('bash'));
+    assert.ok(toolNames.includes('read'));
+    assert.ok(toolNames.includes('fetch_page'));
+
+    const sysMsg = (provider.requests[0]!.messages as Array<{ role: string; content: string }>).find(
+      (m) => m.role === 'system',
+    );
+    assert.match(sysMsg?.content ?? '', /АКТИВНЫЙ НАВЫК: \/reframe/);
+    assert.match(sysMsg?.content ?? '', /Перечисли ключевые термины/);
+
+    const delResp = await fetch(`${base}/api/skills?name=reframe`, { method: 'DELETE' });
+    const delJson = (await delResp.json()) as { deleted: boolean; skills: unknown[] };
+    assert.equal(delJson.deleted, true);
+    assert.equal(delJson.skills.length, 0);
+  } finally {
+    await close(server);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
+    await rm(skillsDir, { recursive: true, force: true });
+  }
+});

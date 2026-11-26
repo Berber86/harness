@@ -1,0 +1,743 @@
+const $ = (id) => document.getElementById(id);
+const welcomeHtml = $('messages').innerHTML;
+
+const DEFAULT_MODEL_OPTIONS = [
+  { value: 'gidra-code-auto', label: 'Gidra Code Auto (для кода)' },
+  { value: 'gidra-auto', label: 'Gidra Auto' },
+  { value: 'hydra-gpt-mini', label: 'Hydra GPT Mini (дешевле)' },
+  { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
+  { value: 'demo-model', label: 'Демо (без ключа)' },
+];
+
+const DEFAULT_ROLES = [
+  {
+    id: 'coder',
+    name: 'Программист',
+    description: 'Пишет и редактирует код в папке workspace, запускает простые проверки.',
+    instructions:
+      'Ты — программист. Пиши чистый и понятный код только внутри рабочей папки workspace. Перед изменением файла сначала прочитай его, не трать шаги впустую и кратко сообщи, что изменил.',
+    model: 'gidra-code-auto',
+    enabled: true,
+    tools: ['read', 'write', 'bash'],
+  },
+  {
+    id: 'reviewer',
+    name: 'Проверяющий',
+    description: 'Проверяет код на ошибки, баги и крайние случаи без изменения файлов.',
+    instructions:
+      'Ты — внимательный проверяющий (код-ревьюер). Прочитай указанные файлы, при необходимости запусти проверку и коротко перечисли найденные проблемы или подтверди, что всё хорошо. Не изменяй файлы.',
+    model: 'hydra-gpt-mini',
+    enabled: true,
+    tools: ['read', 'bash'],
+  },
+  {
+    id: 'docs',
+    name: 'Писатель документации',
+    description: 'Пишет понятные README, инструкции и комментарии к коду на русском языке.',
+    instructions:
+      'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала прочитай код, затем обнови нужный документ.',
+    model: 'hydra-gpt-mini',
+    enabled: false,
+    tools: ['read', 'write'],
+  },
+];
+
+function loadStoredRoles() {
+  try {
+    const raw = localStorage.getItem('harness.roles');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    }
+  } catch {
+    // ignore corrupted storage
+  }
+  return DEFAULT_ROLES.map((role) => ({ ...role, tools: [...role.tools] }));
+}
+
+function loadStoredModels() {
+  try {
+    const raw = localStorage.getItem('harness.models');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed.map((id) => ({ value: id, label: id }));
+      }
+    }
+  } catch {
+    // ignore corrupted storage
+  }
+  return DEFAULT_MODEL_OPTIONS;
+}
+
+const state = {
+  apiKey: localStorage.getItem('harness.apiKey') || '',
+  model: localStorage.getItem('harness.model') || 'gidra-code-auto',
+  demo: localStorage.getItem('harness.demo') === null ? !localStorage.getItem('harness.apiKey') : localStorage.getItem('harness.demo') === '1',
+  sessionId: null,
+  lastCheckpointId: null,
+  busy: false,
+  controller: null,
+  files: [],
+  roles: loadStoredRoles(),
+  modelOptions: loadStoredModels(),
+  editingRoleId: null,
+};
+
+function toast(message) {
+  const element = $('toast');
+  element.textContent = message;
+  element.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { element.hidden = true; }, 4000);
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Ошибка ${response.status}`);
+  return data;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function formatInline(text) {
+  return text
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  return escapeHtml(text)
+    .split('```')
+    .map((part, index) => {
+      if (index % 2 === 1) return `<pre><code>${part.replace(/^\w+\n/, '').replace(/^\n/, '')}</code></pre>`;
+      return part.split('\n').map(formatInline).join('<br>');
+    })
+    .join('');
+}
+
+function scrollToBottom() {
+  $('messages').scrollTop = $('messages').scrollHeight;
+}
+
+function addMessage(role, text, { streaming = false } = {}) {
+  const welcome = $('messages').querySelector('.welcome');
+  if (welcome) welcome.remove();
+  const wrapper = document.createElement('div');
+  wrapper.className = `message ${role}`;
+  if (role === 'assistant') {
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = '✦';
+    wrapper.appendChild(avatar);
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  const activity = document.createElement('div');
+  const textElement = document.createElement('div');
+  if (streaming) {
+    activity.className = 'activity-collection';
+    bubble.appendChild(activity);
+    textElement.textContent = 'Думаю…';
+    textElement.style.color = 'var(--muted)';
+  } else {
+    textElement.innerHTML = renderMarkdown(text);
+  }
+  bubble.appendChild(textElement);
+  wrapper.appendChild(bubble);
+  $('messages').appendChild(wrapper);
+  scrollToBottom();
+  return { wrapper, bubble, textElement, activity };
+}
+
+function appendActivity(target, text, detail) {
+  const line = document.createElement('div');
+  line.className = 'activity';
+  line.textContent = text;
+  if (detail) {
+    const small = document.createElement('span');
+    small.className = 'detail';
+    small.textContent = detail;
+    line.appendChild(small);
+  }
+  target.appendChild(line);
+  scrollToBottom();
+}
+
+function addNotice(text) {
+  const element = document.createElement('div');
+  element.className = 'notice';
+  element.textContent = text;
+  $('messages').appendChild(element);
+  scrollToBottom();
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  $('sendButton').disabled = busy;
+  $('stopButton').hidden = !busy;
+}
+
+async function readSse(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary;
+    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+      const chunk = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const line = chunk.split('\n').find((item) => item.startsWith('data: '));
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)));
+      } catch (error) {
+        console.error('Не удалось прочитать событие', error);
+      }
+    }
+  }
+}
+
+async function sendMessage(promptText) {
+  if (state.busy) return;
+  const prompt = (promptText ?? $('prompt').value).trim();
+  if (!prompt) return;
+  if (!state.demo && !state.apiKey.trim()) {
+    toast('Вставь ключ HydraAI в левой панели и нажми «Сохранить»');
+    $('apiKey').focus();
+    return;
+  }
+  $('prompt').value = '';
+  addMessage('user', prompt);
+  const assistant = addMessage('assistant', '', { streaming: true });
+  setBusy(true);
+  const controller = new AbortController();
+  state.controller = controller;
+  let fullText = '';
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        apiKey: state.apiKey,
+        model: state.model,
+        demo: state.demo,
+        sessionId: state.sessionId,
+        roles: state.roles,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || 'Не удалось отправить сообщение');
+    }
+    assistant.textElement.textContent = '';
+    assistant.textElement.style.color = '';
+
+    await readSse(response, (event) => {
+      switch (event.type) {
+        case 'started':
+          state.sessionId = event.sessionId;
+          markActiveSession();
+          break;
+        case 'text':
+          fullText += event.text;
+          assistant.textElement.textContent = fullText;
+          scrollToBottom();
+          break;
+        case 'activity':
+          appendActivity(assistant.activity, event.text, event.detail);
+          break;
+        case 'notice':
+          addNotice(event.text);
+          break;
+        case 'error':
+          toast(event.message);
+          appendActivity(assistant.activity, `Ошибка: ${event.message}`);
+          break;
+        case 'checkpoint':
+          state.lastCheckpointId = event.checkpointId;
+          break;
+        case 'done':
+          state.sessionId = event.result.sessionId;
+          state.lastCheckpointId = event.result.checkpointId || state.lastCheckpointId;
+          if (event.result.changes) renderChanges(event.result.changes);
+          if (event.files) {
+            state.files = event.files;
+            renderFiles();
+          }
+          if (event.result.stopReason === 'error' && !fullText) {
+            appendActivity(assistant.activity, 'Задача не выполнена. Проверь ключ и попробуй ещё раз.');
+          } else if (event.result.stopReason === 'loop_detected' && !fullText) {
+            fullText =
+              'Кажется, я хожу по кругу — остановился, чтобы не тратить лишние токены. Подскажи, пожалуйста, как лучше действовать, или начни новый чат.';
+            assistant.textElement.textContent = fullText;
+          } else if (event.result.stopReason === 'max_turns' && !fullText) {
+            fullText =
+              'Достигнут лимит шагов для одной задачи. Если нужно продолжить — напиши, что делать дальше, или начни новый чат.';
+            assistant.textElement.textContent = fullText;
+          }
+          markActiveSession();
+          loadSessions();
+          break;
+      }
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      appendActivity(assistant.activity, 'Остановлено');
+    } else {
+      assistant.bubble.classList.add('error-bubble');
+      assistant.textElement.textContent = `Не получилось: ${error.message}`;
+      toast(error.message);
+    }
+  } finally {
+    if (fullText) assistant.textElement.innerHTML = renderMarkdown(fullText);
+    setBusy(false);
+    scrollToBottom();
+  }
+}
+
+function renderChanges(changes) {
+  const container = $('changes');
+  container.innerHTML = '';
+  if (!changes || !changes.length) {
+    container.className = 'changes-empty';
+    container.textContent = 'В этой задаче файлы не менялись.';
+  } else {
+    container.className = '';
+    for (const change of changes) {
+      const card = document.createElement('div');
+      card.className = 'change-card';
+      const path = document.createElement('div');
+      path.className = 'change-path';
+      path.textContent = `${change.before === null ? '＋ ' : '✎ '}${change.path}`;
+      card.appendChild(path);
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.className = 'change-preview';
+      summary.textContent = 'Посмотреть содержимое';
+      const preview = document.createElement('div');
+      preview.className = 'change-preview';
+      preview.textContent = change.after === null ? '(файл удалён)' : change.after.slice(0, 300);
+      details.appendChild(summary);
+      details.appendChild(preview);
+      card.appendChild(details);
+      container.appendChild(card);
+    }
+  }
+  $('rollbackButton').hidden = !state.lastCheckpointId;
+}
+
+async function renderCheckpoints(checkpoints) {
+  if (checkpoints && checkpoints.length) {
+    state.lastCheckpointId = checkpoints[checkpoints.length - 1].id;
+    const last = checkpoints[checkpoints.length - 1];
+    renderChanges(last.changes);
+  } else {
+    state.lastCheckpointId = null;
+    $('changes').className = 'changes-empty';
+    $('changes').textContent = 'Пока нет изменений. После задачи здесь появится список файлов.';
+    $('rollbackButton').hidden = true;
+  }
+}
+
+function renderFiles() {
+  const list = $('fileList');
+  list.innerHTML = '';
+  if (!state.files.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-small';
+    empty.textContent = 'Папка пуста';
+    list.appendChild(empty);
+    return;
+  }
+  for (const file of state.files) {
+    const button = document.createElement('button');
+    button.className = 'list-item';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `📄 ${file.path}`;
+    const size = document.createElement('span');
+    size.className = 'meta';
+    size.textContent = `${Math.max(1, Math.round(file.size / 1024))} КБ`;
+    button.appendChild(name);
+    button.appendChild(size);
+    button.addEventListener('click', () => openFile(file.path));
+    list.appendChild(button);
+  }
+}
+
+async function openFile(filePath) {
+  try {
+    const data = await api(`/api/file?path=${encodeURIComponent(filePath)}`);
+    $('fileModalTitle').textContent = data.path;
+    $('fileModalContent').textContent = data.content;
+    $('fileModal').hidden = false;
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function loadFiles() {
+  try {
+    const data = await api('/api/files');
+    state.files = data.files;
+    renderFiles();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function loadSessions() {
+  try {
+    const data = await api('/api/sessions');
+    const list = $('sessionList');
+    list.innerHTML = '';
+    if (!data.sessions.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-small';
+      empty.textContent = 'Пока нет чатов';
+      list.appendChild(empty);
+      return;
+    }
+    for (const session of data.sessions) {
+      const button = document.createElement('button');
+      button.className = 'list-item' + (session.id === state.sessionId ? ' active' : '');
+      button.dataset.sessionId = session.id;
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = `💬 Чат ${session.id.slice(0, 8)}`;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = new Date(session.updatedAt).toLocaleDateString('ru-RU');
+      button.appendChild(name);
+      button.appendChild(meta);
+      button.addEventListener('click', () => openSession(session.id));
+      list.appendChild(button);
+    }
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function markActiveSession() {
+  document.querySelectorAll('#sessionList .list-item').forEach((item) => {
+    item.classList.toggle('active', item.dataset.sessionId === state.sessionId);
+  });
+}
+
+async function openSession(id) {
+  if (state.busy) return;
+  try {
+    const data = await api(`/api/session?id=${encodeURIComponent(id)}`);
+    state.sessionId = data.session.id;
+    $('messages').innerHTML = '';
+    const shown = data.session.messages.filter((message) => message.role === 'user' || (message.role === 'assistant' && message.content));
+    if (!shown.length) addMessage('user', 'Новый чат');
+    for (const message of shown) addMessage(message.role, message.content);
+    await renderCheckpoints(data.session.checkpoints);
+    $('chatTitle').textContent = `Чат ${id.slice(0, 8)}`;
+    markActiveSession();
+    scrollToBottom();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function newChat() {
+  if (state.busy) return;
+  state.sessionId = null;
+  state.lastCheckpointId = null;
+  $('messages').innerHTML = welcomeHtml;
+  $('chatTitle').textContent = 'Новый чат';
+  $('changes').className = 'changes-empty';
+  $('changes').textContent = 'Пока нет изменений. После задачи здесь появится список файлов.';
+  $('rollbackButton').hidden = true;
+  $('prompt').focus();
+  markActiveSession();
+}
+
+function saveSettings() {
+  state.apiKey = $('apiKey').value.trim();
+  state.demo = $('demoMode').checked;
+  const option = $('model').options[$('model').selectedIndex];
+  state.model = $('model').value || 'gidra-code-auto';
+  localStorage.setItem('harness.apiKey', state.apiKey);
+  localStorage.setItem('harness.model', state.model);
+  localStorage.setItem('harness.demo', state.demo ? '1' : '0');
+  $('modelBadge').textContent = state.demo ? 'демо-режим' : state.model;
+  const status = $('connectionStatus');
+  status.className = 'status' + (state.demo || state.apiKey ? ' ok' : '');
+  if (state.demo) status.textContent = 'Демо-режим: ключ не нужен';
+  else status.textContent = state.apiKey
+    ? `Ключ сохранён в браузере · ${option ? option.text : state.model}`
+    : 'Введите ключ, чтобы начать';
+  toast('Настройки сохранены');
+}
+
+function saveRoles() {
+  localStorage.setItem('harness.roles', JSON.stringify(state.roles));
+  updateTeamBadge();
+}
+
+function updateTeamBadge() {
+  const activeCount = state.roles.filter((role) => role.enabled).length;
+  const badge = $('teamBadge');
+  badge.textContent = activeCount > 0 ? `Команда: ${activeCount} вкл.` : 'Один агент';
+  badge.className = activeCount > 0 ? 'badge' : 'badge badge-soft';
+}
+
+function describePermissions(tools) {
+  const list = Array.isArray(tools) ? tools : [];
+  if (list.includes('write') && list.includes('bash')) return 'код и проверки';
+  if (list.includes('write')) return 'пишет файлы';
+  if (list.includes('bash')) return 'чтение и проверки';
+  return 'только чтение';
+}
+
+function populateSelectWithModels(select, selectedValue) {
+  select.innerHTML = '';
+  for (const item of state.modelOptions) {
+    const option = document.createElement('option');
+    option.value = item.value;
+    option.textContent = item.label;
+    select.appendChild(option);
+  }
+  if (selectedValue && ![...select.options].some((o) => o.value === selectedValue)) {
+    const extra = document.createElement('option');
+    extra.value = selectedValue;
+    extra.textContent = selectedValue;
+    select.appendChild(extra);
+  }
+  if (selectedValue) select.value = selectedValue;
+}
+
+function renderRoles() {
+  const container = $('rolesList');
+  container.innerHTML = '';
+  for (const role of state.roles) {
+    const card = document.createElement('div');
+    card.className = `role-card ${role.enabled ? 'enabled' : 'disabled'}`;
+
+    const top = document.createElement('div');
+    top.className = 'role-top';
+
+    const label = document.createElement('label');
+    label.className = 'role-toggle';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = Boolean(role.enabled);
+    checkbox.addEventListener('change', () => {
+      role.enabled = checkbox.checked;
+      saveRoles();
+      renderRoles();
+    });
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'role-name';
+    nameSpan.textContent = role.name;
+    label.appendChild(checkbox);
+    label.appendChild(nameSpan);
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'role-edit-btn';
+    editBtn.title = 'Настроить роль';
+    editBtn.textContent = '⚙';
+    editBtn.addEventListener('click', () => openRoleModal(role.id));
+
+    top.appendChild(label);
+    top.appendChild(editBtn);
+    card.appendChild(top);
+
+    const select = document.createElement('select');
+    select.className = 'field role-model';
+    select.disabled = !role.enabled;
+    populateSelectWithModels(select, role.model || state.model);
+    select.addEventListener('change', () => {
+      role.model = select.value;
+      saveRoles();
+    });
+    card.appendChild(select);
+
+    const meta = document.createElement('div');
+    meta.className = 'role-meta';
+    meta.textContent = `${describePermissions(role.tools)} · ${role.description}`;
+    card.appendChild(meta);
+
+    container.appendChild(card);
+  }
+  updateTeamBadge();
+}
+
+function openRoleModal(roleId = null) {
+  state.editingRoleId = roleId;
+  const existing = roleId ? state.roles.find((role) => role.id === roleId) : null;
+  $('roleModalTitle').textContent = existing ? `Роль: ${existing.name}` : 'Новая роль';
+  $('roleNameInput').value = existing ? existing.name : '';
+  $('roleDescInput').value = existing ? existing.description : '';
+  $('roleInstInput').value = existing ? existing.instructions : '';
+  const tools = new Set(existing?.tools ?? ['read', 'write']);
+  $('roleToolRead').checked = tools.has('read');
+  $('roleToolWrite').checked = tools.has('write');
+  $('roleToolBash').checked = tools.has('bash');
+  $('deleteRoleButton').hidden = !existing || state.roles.length <= 1;
+  $('roleModal').hidden = false;
+  $('roleNameInput').focus();
+}
+
+async function loadModels() {
+  const key = $('apiKey').value.trim();
+  if ($('demoMode').checked) {
+    saveSettings();
+    $('model').value = 'demo-model';
+    saveSettings();
+    $('connectionStatus').className = 'status ok';
+    $('connectionStatus').textContent = 'Демо-режим: можно просто писать задачи';
+    toast('Демо-режим включён');
+    return;
+  }
+  if (!key) {
+    toast('Сначала вставь ключ HydraAI');
+    return;
+  }
+  saveSettings();
+  $('connectionStatus').textContent = 'Проверяю ключ…';
+  try {
+    const data = await api('/api/models', { headers: { 'x-api-key': key } });
+    state.modelOptions = data.models.map((id) => ({ value: id, label: id }));
+    localStorage.setItem('harness.models', JSON.stringify(data.models));
+    populateSelectWithModels($('model'), state.model);
+    renderRoles();
+    saveSettings();
+    $('connectionStatus').className = 'status ok';
+    $('connectionStatus').textContent = `Ключ работает · моделей: ${data.models.length}`;
+    toast('Список моделей обновлён');
+  } catch (error) {
+    $('connectionStatus').className = 'status bad';
+    $('connectionStatus').textContent = `Ошибка: ${error.message}`;
+    toast(error.message);
+  }
+}
+
+$('newChat').addEventListener('click', newChat);
+$('saveSettings').addEventListener('click', saveSettings);
+$('loadModels').addEventListener('click', loadModels);
+$('model').addEventListener('change', saveSettings);
+$('demoMode').addEventListener('change', () => {
+  if ($('demoMode').checked) $('model').value = 'demo-model';
+  else if ($('model').value === 'demo-model') $('model').value = 'gidra-code-auto';
+  saveSettings();
+});
+$('addRoleButton').addEventListener('click', () => openRoleModal(null));
+$('closeRoleModal').addEventListener('click', () => { $('roleModal').hidden = true; });
+$('roleModal').addEventListener('click', (event) => {
+  if (event.target === $('roleModal')) $('roleModal').hidden = true;
+});
+$('deleteRoleButton').addEventListener('click', () => {
+  if (!state.editingRoleId || state.roles.length <= 1) return;
+  state.roles = state.roles.filter((role) => role.id !== state.editingRoleId);
+  saveRoles();
+  renderRoles();
+  $('roleModal').hidden = true;
+  toast('Роль удалена');
+});
+$('roleForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const name = $('roleNameInput').value.trim();
+  const description = $('roleDescInput').value.trim();
+  const instructions = $('roleInstInput').value.trim();
+  const tools = [];
+  if ($('roleToolRead').checked) tools.push('read');
+  if ($('roleToolWrite').checked) tools.push('write');
+  if ($('roleToolBash').checked) tools.push('bash');
+  if (!tools.length) tools.push('read');
+
+  if (state.editingRoleId) {
+    const role = state.roles.find((item) => item.id === state.editingRoleId);
+    if (role) {
+      role.name = name;
+      role.description = description;
+      role.instructions = instructions;
+      role.tools = tools;
+    }
+  } else {
+    state.roles.push({
+      id: `role-${Date.now().toString(36)}`,
+      name,
+      description,
+      instructions,
+      model: state.model === 'demo-model' ? 'hydra-gpt-mini' : state.model,
+      enabled: true,
+      tools,
+    });
+  }
+  saveRoles();
+  renderRoles();
+  $('roleModal').hidden = true;
+  toast('Роль сохранена');
+});
+$('sendButton').addEventListener('click', () => sendMessage());
+$('stopButton').addEventListener('click', () => state.controller?.abort());
+$('composerForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendMessage();
+});
+$('prompt').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+});
+$('closeModal').addEventListener('click', () => { $('fileModal').hidden = true; });
+$('fileModal').addEventListener('click', (event) => {
+  if (event.target === $('fileModal')) $('fileModal').hidden = true;
+});
+$('rollbackButton').addEventListener('click', async () => {
+  if (!state.lastCheckpointId) return;
+  if (!confirm('Вернуть файлы и разговор к состоянию до последней задачи?')) return;
+  try {
+    await api('/api/rollback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, checkpointId: state.lastCheckpointId }),
+    });
+    toast('Изменения отменены');
+    await loadFiles();
+    if (state.sessionId) await openSession(state.sessionId);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+$('messages').addEventListener('click', (event) => {
+  const button = event.target.closest('.example');
+  if (!button) return;
+  $('prompt').value = button.dataset.prompt;
+  $('prompt').focus();
+});
+
+$('apiKey').value = state.apiKey;
+$('demoMode').checked = state.demo;
+if (state.demo) state.model = 'demo-model';
+populateSelectWithModels($('model'), state.model);
+$('modelBadge').textContent = state.demo ? 'демо-режим' : state.model;
+if (state.demo) {
+  $('connectionStatus').className = 'status ok';
+  $('connectionStatus').textContent = 'Демо-режим: ключ не нужен';
+} else if (state.apiKey) {
+  $('connectionStatus').className = 'status ok';
+  $('connectionStatus').textContent = 'Ключ сохранён в этом браузере';
+}
+renderRoles();
+loadFiles();
+loadSessions();

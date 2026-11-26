@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Мой помощник — harness</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">✦</div>
+        <div>
+          <div class="brand-title">Мой помощник</div>
+          <div class="brand-subtitle">работает с файлами в песочнице</div>
+        </div>
+      </div>
+
+      <button id="newChat" class="button button-primary button-wide">＋ Новый чат</button>
+
+      <section class="side-section">
+        <div class="section-title">Подключение</div>
+        <label class="field-label" for="apiKey">Ключ HydraAI</label>
+        <input id="apiKey" class="field" type="password" placeholder="sk-hydra-ai-..." autocomplete="off">
+        <div class="hint">Ключ сохраняется только в этом браузере. <a href="https://dashboard.hydraai.ru" target="_blank" rel="noopener">Где взять ключ ↗</a></div>
+        <label class="checkbox-label"><input type="checkbox" id="demoMode"> Демо-режим (без ключа)</label>
+
+        <label class="field-label" for="model">Главная модель (Руководитель)</label>
+        <select id="model" class="field">
+          <option value="gidra-code-auto">Gidra Code Auto (для кода)</option>
+          <option value="gidra-auto">Gidra Auto</option>
+          <option value="hydra-gpt-mini">Hydra GPT Mini (дешевле)</option>
+          <option value="claude-sonnet-4.5">Claude Sonnet 4.5</option>
+          <option value="demo-model">Демо (без ключа)</option>
+        </select>
+        <div class="button-row">
+          <button id="saveSettings" class="button button-secondary">Сохранить</button>
+          <button id="loadModels" class="button button-secondary">Обновить список</button>
+        </div>
+        <div id="connectionStatus" class="status">Введите ключ, чтобы начать</div>
+      </section>
+
+      <section class="side-section">
+        <div class="section-header">
+          <div class="section-title">Команда ролей</div>
+          <button id="addRoleButton" type="button" class="mini-button">＋ Роль</button>
+        </div>
+        <div class="hint roles-hint">Включи нужных помощников и выбери каждому свою модель.</div>
+        <div id="rolesList" class="roles-list"></div>
+      </section>
+
+      <section class="side-section">
+        <div class="section-title">Мои чаты</div>
+        <div id="sessionList" class="list"><div class="empty-small">Пока нет чатов</div></div>
+      </section>
+
+      <section class="side-section">
+        <div class="section-title">Файлы песочницы</div>
+        <div id="fileList" class="list"><div class="empty-small">Загрузка…</div></div>
+      </section>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div>
+          <div id="chatTitle" class="chat-title">Новый чат</div>
+          <div class="chat-subtitle">Попроси что-то сделать — я покажу, что получилось</div>
+        </div>
+        <div class="header-badges">
+          <div id="teamBadge" class="badge badge-soft">Команда: 0</div>
+          <div id="modelBadge" class="badge">gidra-code-auto</div>
+        </div>
+      </header>
+
+      <div id="messages" class="messages">
+        <div class="welcome">
+          <div class="welcome-icon">👋</div>
+          <h1>Привет! Я помогу тебе с кодом</h1>
+          <p>Напиши, что нужно сделать. Я буду работать только в папке <code>workspace</code> и покажу каждое действие. Если что-то не понравится — нажмёшь «Откатить».</p>
+          <div class="examples">
+            <button class="example" data-prompt="Создай файл example.py с простой функцией сложения двух чисел">Создай файл с функцией</button>
+            <button class="example" data-prompt="Посмотри files в песочнице и объясни, что там лежит">Что есть в песочнице?</button>
+            <button class="example" data-prompt="Добавь короткий тест для функции из example.py">Добавь тест</button>
+          </div>
+        </div>
+      </div>
+
+      <form id="composerForm" class="composer">
+        <textarea id="prompt" rows="2" placeholder="Напиши задачу простыми словами…"></textarea>
+        <div class="composer-actions">
+          <span class="hint">Enter — отправить, Shift+Enter — новая строка</span>
+          <button type="button" id="stopButton" class="button button-danger" hidden>Остановить</button>
+          <button type="submit" id="sendButton" class="button button-primary">Отправить ➤</button>
+        </div>
+      </form>
+    </main>
+
+    <aside class="changes-panel">
+      <div class="section-title">Что изменилось</div>
+      <div id="changes" class="changes-empty">Пока нет изменений. После задачи здесь появится список файлов.</div>
+      <button id="rollbackButton" class="button button-secondary button-wide" hidden>↩ Откатить последние изменения</button>
+      <details class="help">
+        <summary>Как это работает?</summary>
+        <p>1. Ты пишешь задачу.<br>2. Я читаю и меняю файлы в папке <code>workspace</code>.<br>3. Справа видно, что изменилось.<br>4. Кнопка «Откатить» вернёт файлы и разговор к предыдущему состоянию.<br>5. Встроенный автостоп сам остановит помощника, если он пойдёт по кругу и начнёт тратить токены впустую.</p>
+      </details>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <div id="fileModal" class="modal" hidden>
+    <div class="modal-window">
+      <div class="modal-header">
+        <span id="fileModalTitle">Файл</span>
+        <button id="closeModal" class="button button-secondary">Закрыть</button>
+      </div>
+      <pre id="fileModalContent"></pre>
+    </div>
+  </div>
+
+  <div id="roleModal" class="modal" hidden>
+    <div class="modal-window modal-small">
+      <div class="modal-header">
+        <span id="roleModalTitle">Настройка роли</span>
+        <button id="closeRoleModal" type="button" class="button button-secondary">Закрыть</button>
+      </div>
+      <form id="roleForm" class="modal-body">
+        <label class="field-label" for="roleNameInput">Название роли</label>
+        <input id="roleNameInput" class="field" type="text" required placeholder="Например: Тестировщик">
+
+        <label class="field-label" for="roleDescInput">Когда вызывать (для Руководителя)</label>
+        <input id="roleDescInput" class="field" type="text" required placeholder="Коротко: что делает этот помощник">
+
+        <label class="field-label" for="roleInstInput">Инструкция для модели</label>
+        <textarea id="roleInstInput" class="field" rows="3" required placeholder="Как этот агент должен работать"></textarea>
+
+        <div class="field-label">Что разрешено делать</div>
+        <div class="role-perms">
+          <label class="checkbox-label"><input type="checkbox" id="roleToolRead" checked> Читать файлы</label>
+          <label class="checkbox-label"><input type="checkbox" id="roleToolWrite"> Менять файлы</label>
+          <label class="checkbox-label"><input type="checkbox" id="roleToolBash"> Запускать команды</label>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="deleteRoleButton" class="button button-danger">Удалить</button>
+          <button type="submit" class="button button-primary">Сохранить роль</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[project]
+name = "coding-harness"
+version = "0.1.0"
+description = "Lightweight Python coding agent harness inspired by Arena, pi, and opencode"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "chainlit>=2.0.0",
+    "litellm>=1.55.0",
+    "python-dotenv>=1.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

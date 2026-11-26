@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 import chainlit as cl
-from chainlit.input_widget import TextInput
+from chainlit.input_widget import Select, TextInput
 from dotenv import load_dotenv
 
 from harness.agent import run_agent_turn
@@ -68,7 +68,11 @@ async def on_chat_start():
 
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
-    model = settings.get("model", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    preset = settings.get("model_preset", "")
+    if preset and not preset.startswith("Своя"):
+        model = preset.split(" ", 1)[0].strip()
+    else:
+        model = settings.get("model", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     api_base = settings.get("api_base", DEFAULT_API_BASE).strip() or None
     api_key = settings.get("api_key", DEFAULT_API_KEY).strip() or None
     workdir_raw = settings.get("workdir", DEFAULT_WORKDIR).strip() or DEFAULT_WORKDIR

@@ -13,6 +13,32 @@ OnToolStart = Callable[[str, str], Awaitable[Any]]
 OnToolEnd = Callable[[Any, str], Awaitable[None]]
 
 
+def _trim_history(
+    messages: list[dict[str, Any]],
+    max_messages: int = 16,
+    tool_keep_recent: int = 4,
+) -> list[dict[str, Any]]:
+    """Trim old messages and shrink old tool outputs to save tokens."""
+    trimmed = messages[-max_messages:] if len(messages) > max_messages else list(messages)
+    # Never start trimmed history with an orphaned 'tool' message
+    while trimmed and trimmed[0].get("role") == "tool":
+        trimmed.pop(0)
+
+    cutoff = max(0, len(trimmed) - tool_keep_recent)
+    result: list[dict[str, Any]] = []
+    for idx, msg in enumerate(trimmed):
+        if idx < cutoff and msg.get("role") == "tool":
+            content = msg.get("content") or ""
+            if len(content) > 400:
+                msg = {
+                    **msg,
+                    "content": content[:200]
+                    + "\n... [старый вывод скрыт для экономии токенов]",
+                }
+        result.append(msg)
+    return result
+
+
 async def run_agent_turn(
     messages: list[dict[str, Any]],
     model: str,
@@ -23,13 +49,14 @@ async def run_agent_turn(
     on_ask_user: OnAskUser | None = None,
     api_base: str | None = None,
     api_key: str | None = None,
-    max_steps: int = 20,
+    max_steps: int = 12,
 ) -> list[dict[str, Any]]:
     """Run the tool-calling agent loop until a final response or max_steps."""
     system_prompt = build_system_prompt(workdir)
 
     for _ in range(max_steps):
-        full_messages = [{"role": "system", "content": system_prompt}, *messages]
+        context_messages = _trim_history(messages)
+        full_messages = [{"role": "system", "content": system_prompt}, *context_messages]
 
         completion_kwargs: dict[str, Any] = {
             "model": model,

@@ -1,5 +1,5 @@
 import { exec } from 'node:child_process';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Tool } from '../types.js';
@@ -358,13 +358,148 @@ export function createBashTool(options: BashToolOptions = {}): Tool<{
   };
 }
 
+export function createDeleteFileTool(): Tool<{ path: string }> {
+  return {
+    name: 'delete_file',
+    description:
+      'Delete a single file inside the workspace. Captured by checkpoints so rollback can restore it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path to delete' },
+      },
+      required: ['path'],
+    },
+    async execute(args, context) {
+      const cleaned = args.path.trim();
+      if (!cleaned || cleaned === '.' || cleaned === './') {
+        return { content: 'Refusing to delete the workspace root directory', isError: true };
+      }
+      const absolute = await resolveWithin(context.cwd, cleaned);
+      let info;
+      try {
+        info = await stat(absolute);
+      } catch (error) {
+        return { content: `Cannot delete ${args.path}: ${(error as Error).message}`, isError: true };
+      }
+      if (info.isDirectory()) {
+        return { content: `${args.path} is a directory; delete_file only removes files`, isError: true };
+      }
+      await context.trackFile(args.path);
+      await rm(absolute);
+      return `Deleted ${args.path}`;
+    },
+  };
+}
+
+function isBlockedHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host === '0.0.0.0' || host === '::1') return true;
+  if (host.startsWith('127.') || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) {
+    return true;
+  }
+  const m = /^172\.(\d+)\./.exec(host);
+  if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true;
+  return false;
+}
+
+function htmlToReadableText(html: string): string {
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<\/(p|div|section|article|h[1-6]|li|tr|blockquote|pre)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '• ')
+    .replace(/<[^>]+>/g, ' ');
+
+  return stripped
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export interface FetchPageToolOptions {
+  fetch?: typeof fetch;
+  allowLocal?: boolean;
+}
+
+export function createFetchPageTool(options: FetchPageToolOptions = {}): Tool<{
+  url: string;
+  maxChars?: number;
+}> {
+  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  return {
+    name: 'fetch_page',
+    description:
+      'Fetch a web page (http/https) and extract readable text. Useful for reading documentation or examples from a URL.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The http or https URL to read' },
+        maxChars: { type: 'number', description: 'Optional character limit (default 10000)' },
+      },
+      required: ['url'],
+    },
+    async execute(args, context) {
+      let parsed: URL;
+      try {
+        parsed = new URL(args.url.trim());
+      } catch {
+        return { content: `Invalid URL: ${args.url}`, isError: true };
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { content: 'Only http:// and https:// URLs are allowed', isError: true };
+      }
+      if (!options.allowLocal && isBlockedHost(parsed.hostname)) {
+        return { content: 'Refusing to fetch private or local network addresses', isError: true };
+      }
+
+      const signal = context.signal
+        ? AbortSignal.any([context.signal, AbortSignal.timeout(15_000)])
+        : AbortSignal.timeout(15_000);
+      let response: Response;
+      try {
+        response = await fetchImpl(parsed.toString(), {
+          headers: { 'user-agent': 'harness-core/0.1', accept: 'text/html,text/plain,application/json,*/*' },
+          signal,
+        });
+      } catch (error) {
+        return { content: `Failed to fetch ${parsed.toString()}: ${(error as Error).message}`, isError: true };
+      }
+      if (!response.ok) {
+        return { content: `Page returned HTTP ${response.status} (${response.statusText})`, isError: true };
+      }
+
+      const contentType = response.headers.get('content-type') ?? '';
+      const raw = await response.text();
+      const text = contentType.includes('text/html') || /^\s*<!doctype|^\s*<html/i.test(raw)
+        ? htmlToReadableText(raw)
+        : raw.trim();
+      const limit = Math.max(500, Math.min(20_000, args.maxChars ?? 10_000));
+      return `[Source: ${response.url || parsed.toString()}]\n${truncate(text || '(empty page)', limit)}`;
+    },
+  };
+}
+
 export function createDefaultTools(options: BashToolOptions = {}) {
   return [
     createReadTool(),
     createEditTool(),
     createWriteTool(),
+    createDeleteFileTool(),
     createListFilesTool(),
     createSearchTool(),
+    createFetchPageTool(),
     createBashTool(options),
   ];
 }

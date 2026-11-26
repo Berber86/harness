@@ -7,20 +7,32 @@ import {
   FileSessionStore,
   Session,
   buildLeadSystemPrompt,
+  createAskUserTool,
   createDefaultTools,
   createDelegateTool,
+  newId,
   openaiCompatibleProvider,
   resolveWithin,
   rollbackToCheckpoint,
 } from '../index.js';
-import type { AgentRole, Checkpoint, ModelProvider, RoleToolName, Tool } from '../index.js';
+import type {
+  AgentRole,
+  AskUserAnswer,
+  AskUserResponse,
+  Checkpoint,
+  ModelProvider,
+  RoleToolName,
+  Tool,
+} from '../index.js';
 import { buildZip } from './zip.js';
 
 const DEFAULT_BASE_URL = 'https://api.hydraai.ru/v1';
 const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по программированию. Отвечай по-русски, коротко и понятно.
 Рабочая папка — это песочница: меняй файлы только внутри неё.
+Перед тем как начать писать или менять код по новой задаче, сначала задай 2–3 коротких уточняющих вопроса через инструмент ask_user с вариантами ответа (если пользователь только что не ответил на твои вопросы и это не совсем маленький информационный вопрос). Это помогает сделать именно то, что нужно, без переделок и лишних трат токенов.
 Для просмотра списка файлов и поиска по коду используй list_files и search (не запускай ls/grep через bash).
 Для чтения больших файлов используй read с offset и limit. Для небольших правок используй edit вместо полной перезаписи через write — это экономит токены.
+Если нужно удалить ненужный файл — используй delete_file (удаление можно будет откатить). Если пользователь дал ссылку на страницу — прочитай её через fetch_page.
 Инструмент bash используй только для запуска программ, тестов и сборки. Объясняй, что ты сделал.`;
 
 export interface AppServerOptions {
@@ -65,13 +77,74 @@ function createDemoProvider(activeRoles: AgentRole[] = []): ModelProvider {
   return {
     name: 'demo',
     async *chat({ messages, tools }) {
+      const hasAsk = tools.some((tool) => tool.name === 'ask_user');
       const hasDelegate = tools.some((tool) => tool.name === 'delegate');
       const canWrite = tools.some((tool) => tool.name === 'write');
-      const toolAlreadyUsed = messages.some((message) => message.role === 'tool');
+      const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+      const wantsQuestion = /вопрос|спроси|вариант/i.test(lastUser?.content ?? '');
+      const toolResults = messages.flatMap((message) => message.toolResults ?? []);
+      const askResult = toolResults.find((res) => res.name === 'ask_user');
+      const otherToolUsed = toolResults.some((res) => res.name !== 'ask_user');
+
+      if (hasAsk && wantsQuestion && !askResult) {
+        yield {
+          type: 'tool_call',
+          index: 0,
+          id: 'demo-ask',
+          name: 'ask_user',
+          argumentsDelta: JSON.stringify({
+            questions: [
+              {
+                id: 'demo_kind',
+                question: 'Что создать для проверки в демо-режиме?',
+                options: [
+                  {
+                    id: 'site',
+                    label: 'Мини-сайт (index.html)',
+                    description: 'Можно сразу открыть кнопкой «🌐 Сайт» в песочнице',
+                  },
+                  {
+                    id: 'note',
+                    label: 'Текстовую заметку (demo-note.txt)',
+                    description: 'Обычный текстовый файл с возможностью отката',
+                  },
+                ],
+                allowCustomResponse: true,
+              },
+            ],
+          }),
+        };
+        yield { type: 'done', stopReason: 'tool_use' };
+        return;
+      }
+
+      if (askResult && !otherToolUsed && canWrite) {
+        const pickedSite = askResult.content.includes('"selectedOptionId":"site"');
+        yield {
+          type: 'tool_call',
+          index: 0,
+          id: 'demo-after-ask',
+          name: 'write',
+          argumentsDelta: JSON.stringify(
+            pickedSite
+              ? {
+                  path: 'index.html',
+                  content:
+                    '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Демо-сайт</title><body style="font-family:sans-serif;padding:40px"><h1>Привет из песочницы!</h1><p>Этот сайт создан в демо-режиме после твоего выбора.</p></body></html>\n',
+                }
+              : {
+                  path: 'demo-note.txt',
+                  content: 'Привет! Это файл из демо-режима после твоего ответа.\n',
+                },
+          ),
+        };
+        yield { type: 'done', stopReason: 'tool_use' };
+        return;
+      }
 
       if (hasDelegate && activeRoles.length > 0) {
         const chosen = activeRoles[0]!;
-        if (!toolAlreadyUsed) {
+        if (!otherToolUsed) {
           yield {
             type: 'tool_call',
             index: 0,
@@ -97,7 +170,7 @@ function createDemoProvider(activeRoles: AgentRole[] = []): ModelProvider {
         return;
       }
 
-      if (!toolAlreadyUsed) {
+      if (!otherToolUsed) {
         if (canWrite) {
           yield {
             type: 'tool_call',
@@ -120,11 +193,14 @@ function createDemoProvider(activeRoles: AgentRole[] = []): ModelProvider {
         }
         yield { type: 'done', stopReason: 'tool_use' };
       } else {
+        const createdSite = messages.some((m) => m.toolCalls?.some((c) => c.arguments?.path === 'index.html'));
         for (const part of [
           'Готово! ',
-          canWrite
-            ? 'Я создал файл demo-note.txt в папке workspace. Нажми «Откатить», чтобы увидеть, как работает отмена.'
-            : 'Я проверил файл README.txt в папке workspace.',
+          createdSite
+            ? 'Я создал мини-сайт index.html в папке workspace. Нажми «🌐 Сайт» слева, чтобы открыть его в браузере!'
+            : canWrite
+              ? 'Я создал файл demo-note.txt в папке workspace. Нажми «Откатить», чтобы увидеть, как работает отмена.'
+              : 'Я проверил файл README.txt в папке workspace.',
         ]) {
           yield { type: 'text_delta', text: part };
         }
@@ -144,7 +220,16 @@ interface IncomingRole {
   tools?: unknown;
 }
 
-const VALID_ROLE_TOOLS = new Set<RoleToolName>(['read', 'edit', 'write', 'list_files', 'search', 'bash']);
+const VALID_ROLE_TOOLS = new Set<RoleToolName>([
+  'read',
+  'edit',
+  'write',
+  'delete_file',
+  'list_files',
+  'search',
+  'fetch_page',
+  'bash',
+]);
 
 function normalizeRoles(raw: IncomingRole[] | undefined, fallbackModel: string): AgentRole[] {
   if (!Array.isArray(raw)) return [];
@@ -170,7 +255,9 @@ function normalizeRoles(raw: IncomingRole[] | undefined, fallbackModel: string):
         : `Ты — ${name}. Выполняй задачи аккуратно внутри рабочей папки workspace.`,
       model: { provider: 'hydra', model: modelName, maxTokens: 4096 },
       enabled: Boolean(item.enabled),
-      tools: tools && tools.length ? tools : ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
+      tools: tools && tools.length
+        ? tools
+        : ['read', 'edit', 'write', 'delete_file', 'list_files', 'search', 'fetch_page', 'bash'],
       maxTurns: 8,
     });
   }
@@ -201,6 +288,68 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
   const baseURL = (options.baseURL ?? process.env.HYDRA_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   const systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const store = new FileSessionStore(sessionDir);
+  const pendingQuestions = new Map<
+    string,
+    { resolve: (response: AskUserResponse) => void; reject: (error: Error) => void }
+  >();
+
+  const PREVIEW_MIME: Record<string, string> = {
+    '.html': 'text/html; charset=utf-8',
+    '.htm': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.txt': 'text/plain; charset=utf-8',
+    '.md': 'text/markdown; charset=utf-8',
+  };
+
+  async function servePreview(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<void> {
+    if (pathname === '/preview') {
+      res.writeHead(302, { location: '/preview/' });
+      res.end();
+      return;
+    }
+    const rel = decodeURIComponent(pathname.slice('/preview/'.length)).replace(/^\/+/, '');
+    if (!rel) {
+      try {
+        const indexPath = await resolveWithin(workspaceDir, 'index.html');
+        const content = await readFile(indexPath);
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(req.method === 'HEAD' ? undefined : content);
+        return;
+      } catch {
+        const files = (await listFiles()).filter((f) => /\.html?$/i.test(f.path));
+        const items = files.length
+          ? files
+              .map((f) => {
+                const safe = f.path.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+                return `<li><a href="/preview/${encodeURI(f.path)}">${safe}</a></li>`;
+              })
+              .join('')
+          : '<li>Пока нет HTML-страниц в папке <code>workspace</code>.</li>';
+        const html = `<!doctype html><html lang="ru"><meta charset="utf-8"><title>Предпросмотр workspace</title><body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 20px"><h2>Сайты из песочницы</h2><ul>${items}</ul></body></html>`;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(req.method === 'HEAD' ? undefined : html);
+        return;
+      }
+    }
+    try {
+      const absolute = await resolveWithin(workspaceDir, rel);
+      const data = await readFile(absolute);
+      const ext = path.extname(absolute).toLowerCase();
+      res.writeHead(200, { 'content-type': PREVIEW_MIME[ext] ?? 'application/octet-stream' });
+      res.end(req.method === 'HEAD' ? undefined : data);
+    } catch {
+      sendJson(res, 404, { error: 'Файл предпросмотра не найден' });
+    }
+  }
 
   async function listFiles(): Promise<FileInfo[]> {
     const files: FileInfo[] = [];
@@ -318,7 +467,39 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
     const provider = resolveModelProvider(leadModel);
     const activeRoleById = new Map(activeRoles.map((role) => [role.id, role]));
 
-    const tools: Tool[] = [...createDefaultTools()];
+    const controller = new AbortController();
+    let finished = false;
+    res.on('close', () => {
+      if (!finished) controller.abort();
+    });
+
+    const askUserTool = createAskUserTool((questions, signal) => {
+      const requestId = newId();
+      sendSse(res, { type: 'ask_user', requestId, questions });
+      return new Promise<AskUserResponse>((resolve, reject) => {
+        const onAbort = () => {
+          pendingQuestions.delete(requestId);
+          reject(new Error('Run aborted'));
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+        pendingQuestions.set(requestId, {
+          resolve(response) {
+            signal?.removeEventListener('abort', onAbort);
+            resolve(response);
+          },
+          reject(error) {
+            signal?.removeEventListener('abort', onAbort);
+            reject(error);
+          },
+        });
+      });
+    });
+
+    const tools: Tool[] = [...createDefaultTools(), askUserTool];
     if (activeRoles.length) {
       tools.push(
         createDelegateTool({
@@ -368,12 +549,6 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
     });
     sendSse(res, { type: 'started', sessionId: session.id });
 
-    const controller = new AbortController();
-    let finished = false;
-    res.on('close', () => {
-      if (!finished) controller.abort();
-    });
-
     try {
       for await (const event of agent.stream(body.prompt, { signal: controller.signal })) {
         switch (event.type) {
@@ -392,6 +567,11 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
                   ? `🤝 Передаю задачу: «${role.name}» (${role.model.model})`
                   : `🤝 Передаю задачу роли «${roleId}»`,
                 detail: typeof event.call.arguments.task === 'string' ? event.call.arguments.task.slice(0, 260) : '',
+              });
+            } else if (event.call.name === 'ask_user') {
+              sendSse(res, {
+                type: 'activity',
+                text: '❓ Задаю уточняющие вопросы…',
               });
             } else {
               sendSse(res, {
@@ -527,6 +707,10 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
               return;
           }
         }
+        if (url.pathname === '/preview' || url.pathname.startsWith('/preview/')) {
+          await servePreview(req, res, url.pathname);
+          return;
+        }
         await serveStatic(req, res, url.pathname);
         return;
       }
@@ -536,6 +720,22 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
           case '/api/chat':
             await handleChat(req, res);
             return;
+          case '/api/answer': {
+            const body = JSON.parse(await readBody(req)) as {
+              requestId?: string;
+              answers?: AskUserAnswer[];
+              skipped?: boolean;
+            };
+            const pending = body.requestId ? pendingQuestions.get(body.requestId) : undefined;
+            if (!pending) {
+              sendJson(res, 404, { error: 'Вопрос уже закрыт или не найден' });
+              return;
+            }
+            pendingQuestions.delete(body.requestId!);
+            pending.resolve({ answers: body.answers ?? [], skipped: Boolean(body.skipped) });
+            sendJson(res, 200, { ok: true });
+            return;
+          }
           case '/api/rollback': {
             const body = JSON.parse(await readBody(req)) as { sessionId?: string; checkpointId?: string };
             const session = body.sessionId ? await Session.load(body.sessionId, store) : null;

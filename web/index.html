@@ -62,7 +62,10 @@
       <section class="side-section">
         <div class="section-header">
           <div class="section-title">Файлы песочницы</div>
-          <a id="downloadAllLink" class="mini-button" href="/api/download-all" download="workspace.zip" title="Скачать все файлы одним архивом">⬇ Скачать ZIP</a>
+          <div class="section-actions">
+            <a id="previewSiteLink" class="mini-button" href="/preview/" target="_blank" rel="noopener" title="Открыть HTML-сайт из песочницы" hidden>🌐 Сайт</a>
+            <a id="downloadAllLink" class="mini-button" href="/api/download-all" download="workspace.zip" title="Скачать все файлы одним архивом">⬇ ZIP</a>
+          </div>
         </div>
         <div id="fileList" class="list"><div class="empty-small">Загрузка…</div></div>
       </section>
@@ -86,9 +89,9 @@
           <h1>Привет! Я помогу тебе с кодом</h1>
           <p>Напиши, что нужно сделать. Я буду работать только в папке <code>workspace</code> и покажу каждое действие. Если что-то не понравится — нажмёшь «Откатить».</p>
           <div class="examples">
+            <button class="example" data-prompt="Спроси меня с вариантами, какой мини-проект создать">Спроси с вариантами</button>
             <button class="example" data-prompt="Создай файл example.py с простой функцией сложения двух чисел">Создай файл с функцией</button>
-            <button class="example" data-prompt="Посмотри files в песочнице и объясни, что там лежит">Что есть в песочнице?</button>
-            <button class="example" data-prompt="Добавь короткий тест для функции из example.py">Добавь тест</button>
+            <button class="example" data-prompt="Посмотри файлы в песочнице и объясни, что там лежит">Что есть в песочнице?</button>
           </div>
         </div>
       </div>
@@ -121,6 +124,7 @@
       <div class="modal-header">
         <span id="fileModalTitle">Файл</span>
         <div class="modal-header-actions">
+          <a id="previewFileLink" class="button button-secondary" href="#" target="_blank" rel="noopener" hidden>🌐 Открыть</a>
           <a id="downloadFileLink" class="button button-primary" href="#" download>⬇ Скачать</a>
           <button id="closeModal" class="button button-secondary">Закрыть</button>
         </div>

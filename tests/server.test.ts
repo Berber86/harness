@@ -372,3 +372,99 @@ test('web app downloads individual workspace files and full zip archive safely',
     await rm(sessionDir, { recursive: true, force: true });
   }
 });
+
+test('web app supports interactive ask_user SSE pause/resume and workspace website preview', async () => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), 'harness-web-ask-ws-'));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'harness-web-ask-sess-'));
+  await writeFile(path.join(workspaceDir, 'index.html'), '<h1>Мой сайт</h1>', 'utf8');
+
+  const provider = new ScriptedProvider(
+    [
+      {
+        type: 'tool_call',
+        index: 0,
+        id: 'ask-1',
+        name: 'ask_user',
+        argumentsDelta: JSON.stringify({
+          questions: [
+            {
+              id: 'theme',
+              question: 'Какую тему выбрать?',
+              options: [
+                { id: 'light', label: 'Светлую' },
+                { id: 'dark', label: 'Тёмную' },
+              ],
+            },
+          ],
+        }),
+      },
+      done('tool_use'),
+    ],
+    [text('Принял ваш выбор: Тёмную!'), done()],
+  );
+
+  const server = createAppServer({
+    workspaceDir,
+    sessionDir,
+    webDir: path.resolve(process.cwd(), 'web'),
+    providerFactory: () => provider,
+  });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const previewResp = await fetch(`${base}/preview/`);
+    assert.equal(previewResp.status, 200);
+    assert.match(await previewResp.text(), /<h1>Мой сайт<\/h1>/);
+
+    const escapePreview = await fetch(`${base}/preview/..%2Fpackage.json`);
+    assert.equal(escapePreview.status, 404);
+
+    const chatResp = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Сделай сайт', apiKey: 'fake-key', model: 'gidra-code-auto' }),
+    });
+    assert.equal(chatResp.status, 200);
+    const reader = chatResp.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const events: Array<{ type: string; requestId?: string; text?: string; result?: { text: string } }> = [];
+
+    let answered = false;
+    for (;;) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+        const ev = JSON.parse(line.slice(6));
+        events.push(ev);
+        if (ev.type === 'ask_user' && !answered) {
+          answered = true;
+          const ansResp = await fetch(`${base}/api/answer`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: ev.requestId,
+              answers: [{ questionId: 'theme', selectedOptionId: 'dark', customResponse: null }],
+            }),
+          });
+          assert.equal(ansResp.status, 200);
+        }
+      }
+    }
+
+    assert.equal(answered, true);
+    const doneEv = events.find((e) => e.type === 'done');
+    assert.equal(doneEv?.result?.text, 'Принял ваш выбор: Тёмную!');
+  } finally {
+    await close(server);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
+  }
+});

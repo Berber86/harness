@@ -3,7 +3,9 @@ import type { ContextOptions } from '../session/context.js';
 import { Session } from '../session/session.js';
 import {
   createBashTool,
+  createDeleteFileTool,
   createEditTool,
+  createFetchPageTool,
   createListFilesTool,
   createReadTool,
   createSearchTool,
@@ -14,7 +16,15 @@ import type { AgentEvent, ModelConfig, ModelProvider, Tool } from '../types.js';
 import { runAgentLoop } from './loop.js';
 import type { LoopDetectionOptions } from './loop.js';
 
-export type RoleToolName = 'read' | 'edit' | 'write' | 'list_files' | 'search' | 'bash';
+export type RoleToolName =
+  | 'read'
+  | 'edit'
+  | 'write'
+  | 'delete_file'
+  | 'list_files'
+  | 'search'
+  | 'fetch_page'
+  | 'bash';
 
 export interface AgentRole {
   /** Unique identifier used by `delegate({ role })`, e.g. 'coder'. */
@@ -56,7 +66,7 @@ export const DEFAULT_ROLE_PRESETS: DefaultRolePreset[] = [
       'Ты — программист. Работай только внутри папки workspace. Для поиска файлов используй list_files и search, для чтения больших файлов — read с offset/limit, для точечных правок — edit вместо полной перезаписи через write. Кратко сообщай, что изменил.',
     defaultModel: 'gidra-code-auto',
     enabled: true,
-    tools: ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
+    tools: ['read', 'edit', 'write', 'delete_file', 'list_files', 'search', 'fetch_page', 'bash'],
   },
   {
     id: 'reviewer',
@@ -76,12 +86,12 @@ export const DEFAULT_ROLE_PRESETS: DefaultRolePreset[] = [
       'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала изучи файлы через list_files/read, затем обнови нужный документ через edit или write.',
     defaultModel: 'hydra-gpt-mini',
     enabled: false,
-    tools: ['read', 'edit', 'write', 'list_files', 'search'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search', 'fetch_page'],
   },
 ];
 
 export function createToolsForRole(
-  allowed: RoleToolName[] = ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
+  allowed: RoleToolName[] = ['read', 'edit', 'write', 'delete_file', 'list_files', 'search', 'fetch_page', 'bash'],
   bashOptions: BashToolOptions = {},
 ): Tool[] {
   const set = new Set<RoleToolName>(allowed);
@@ -89,8 +99,10 @@ export function createToolsForRole(
   if (set.has('read')) tools.push(createReadTool());
   if (set.has('edit')) tools.push(createEditTool());
   if (set.has('write')) tools.push(createWriteTool());
+  if (set.has('delete_file')) tools.push(createDeleteFileTool());
   if (set.has('list_files')) tools.push(createListFilesTool());
   if (set.has('search')) tools.push(createSearchTool());
+  if (set.has('fetch_page')) tools.push(createFetchPageTool());
   if (set.has('bash')) tools.push(createBashTool(bashOptions));
   return tools;
 }

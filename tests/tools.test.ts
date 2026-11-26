@@ -4,8 +4,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
+  createAskUserTool,
   createBashTool,
+  createDeleteFileTool,
   createEditTool,
+  createFetchPageTool,
   createListFilesTool,
   createReadTool,
   createSearchTool,
@@ -143,6 +146,81 @@ test('list_files and search work cross-platform and skip ignored folders', async
 
     const exact = await search.execute({ query: 'hello', caseSensitive: true }, context);
     assert.equal(exact, 'No matches for "hello"');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('delete_file removes files safely, tracks for rollback, and rejects directories', async () => {
+  const { cwd, context, tracked, cleanup } = await setup();
+  try {
+    await mkdir(path.join(cwd, 'dir'), { recursive: true });
+    await writeFile(path.join(cwd, 'old.txt'), 'bye', 'utf8');
+
+    const del = createDeleteFileTool();
+    const res = await del.execute({ path: 'old.txt' }, context);
+    assert.match(String(res), /Deleted old\.txt/);
+    assert.deepEqual(tracked, ['old.txt']);
+    await assert.rejects(readFile(path.join(cwd, 'old.txt')), { code: 'ENOENT' });
+
+    const dirRes = await del.execute({ path: 'dir' }, context);
+    assert.equal((dirRes as { isError?: boolean }).isError, true);
+
+    const rootRes = await del.execute({ path: '.' }, context);
+    assert.equal((rootRes as { isError?: boolean }).isError, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('fetch_page converts HTML to readable text and blocks private addresses', async () => {
+  const { context, cleanup } = await setup();
+  try {
+    const fetchPage = createFetchPageTool({
+      fetch: async (url) =>
+        new Response('<html><head><style>body{}</style></head><body><h1>Привет</h1><p>Текст &amp; код</p></body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        }),
+    });
+
+    const ok = await fetchPage.execute({ url: 'https://example.com/docs' }, context);
+    assert.match(String(ok), /\[Source: https:\/\/example\.com\/docs\]/);
+    assert.match(String(ok), /Привет/);
+    assert.match(String(ok), /Текст & код/);
+
+    const blocked = await fetchPage.execute({ url: 'http://127.0.0.1:8787/' }, context);
+    assert.equal((blocked as { isError?: boolean }).isError, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('ask_user validates questions and returns selected answers', async () => {
+  const { context, cleanup } = await setup();
+  try {
+    const ask = createAskUserTool(async (questions) => ({
+      answers: [{ questionId: questions[0]!.id, selectedOptionId: 'b', customResponse: null }],
+    }));
+
+    const out = await ask.execute(
+      {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Выбор?',
+            options: [
+              { id: 'a', label: 'Первый' },
+              { id: 'b', label: 'Второй' },
+            ],
+          },
+        ],
+      },
+      context,
+    );
+    const parsed = JSON.parse(String(out)) as { answers: Array<{ selectedOptionId: string; selectedLabel: string }> };
+    assert.equal(parsed.answers[0]?.selectedOptionId, 'b');
+    assert.equal(parsed.answers[0]?.selectedLabel, 'Второй');
   } finally {
     await cleanup();
   }

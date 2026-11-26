@@ -18,7 +18,7 @@ const DEFAULT_ROLES = [
       'Ты — программист. Работай только внутри папки workspace. Для поиска файлов используй list_files и search, для чтения больших файлов — read с offset/limit, для точечных правок — edit вместо полной перезаписи через write. Кратко сообщай, что изменил.',
     model: 'gidra-code-auto',
     enabled: true,
-    tools: ['read', 'edit', 'write', 'list_files', 'search', 'bash'],
+    tools: ['read', 'edit', 'write', 'delete_file', 'list_files', 'search', 'fetch_page', 'bash'],
   },
   {
     id: 'reviewer',
@@ -38,7 +38,7 @@ const DEFAULT_ROLES = [
       'Ты — автор документации. Пиши простые, понятные инструкции и комментарии к коду на русском языке, ориентируясь на новичка. Сначала изучи файлы через list_files/read, затем обнови нужный документ через edit или write.',
     model: 'hydra-gpt-mini',
     enabled: false,
-    tools: ['read', 'edit', 'write', 'list_files', 'search'],
+    tools: ['read', 'edit', 'write', 'list_files', 'search', 'fetch_page'],
   },
 ];
 
@@ -50,6 +50,7 @@ function upgradeRoleTools(tools) {
   }
   if (set.has('write')) {
     set.add('edit');
+    set.add('delete_file');
   }
   return [...set];
 }
@@ -273,6 +274,9 @@ async function sendMessage(promptText) {
         case 'activity':
           appendActivity(assistant.activity, event.text, event.detail);
           break;
+        case 'ask_user':
+          renderAskUserCard(event.requestId, event.questions, assistant);
+          break;
         case 'notice':
           addNotice(event.text);
           break;
@@ -322,6 +326,136 @@ async function sendMessage(promptText) {
   }
 }
 
+function renderAskUserCard(requestId, questions, assistant) {
+  const card = document.createElement('div');
+  card.className = 'ask-card';
+  const selections = new Map();
+
+  for (let qi = 0; qi < questions.length; qi++) {
+    const q = questions[qi];
+    const block = document.createElement('div');
+    block.className = 'ask-question';
+
+    const title = document.createElement('div');
+    title.className = 'ask-title';
+    title.textContent = `${qi + 1}. ${q.question}`;
+    block.appendChild(title);
+
+    const optionsWrap = document.createElement('div');
+    optionsWrap.className = 'ask-options';
+
+    let customInput = null;
+    const optionButtons = [];
+
+    for (const opt of q.options || []) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ask-option';
+
+      const label = document.createElement('div');
+      label.className = 'ask-option-label';
+      label.textContent = opt.label;
+      btn.appendChild(label);
+
+      if (opt.description) {
+        const desc = document.createElement('div');
+        desc.className = 'ask-option-desc';
+        desc.textContent = opt.description;
+        btn.appendChild(desc);
+      }
+
+      btn.addEventListener('click', () => {
+        for (const item of optionButtons) item.classList.remove('selected');
+        btn.classList.add('selected');
+        selections.set(q.id, { questionId: q.id, selectedOptionId: opt.id, customResponse: null, label: opt.label });
+        if (customInput) customInput.value = '';
+        updateSubmitState();
+      });
+      optionButtons.push(btn);
+      optionsWrap.appendChild(btn);
+    }
+    block.appendChild(optionsWrap);
+
+    if (q.allowCustomResponse !== false) {
+      customInput = document.createElement('input');
+      customInput.type = 'text';
+      customInput.className = 'field ask-custom';
+      customInput.placeholder = 'Или напиши свой вариант…';
+      customInput.addEventListener('input', () => {
+        const text = customInput.value.trim();
+        if (text) {
+          for (const item of optionButtons) item.classList.remove('selected');
+          selections.set(q.id, { questionId: q.id, selectedOptionId: null, customResponse: text, label: text });
+        } else if (selections.get(q.id)?.customResponse) {
+          selections.delete(q.id);
+        }
+        updateSubmitState();
+      });
+      block.appendChild(customInput);
+    }
+
+    card.appendChild(block);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'ask-actions';
+  const skipBtn = document.createElement('button');
+  skipBtn.type = 'button';
+  skipBtn.className = 'button button-secondary';
+  skipBtn.textContent = 'Пропустить';
+  const submitBtn = document.createElement('button');
+  submitBtn.type = 'button';
+  submitBtn.className = 'button button-primary';
+  submitBtn.textContent = 'Отправить ответы';
+  submitBtn.disabled = true;
+
+  function updateSubmitState() {
+    submitBtn.disabled = selections.size === 0;
+  }
+
+  async function finish(skipped) {
+    skipBtn.disabled = true;
+    submitBtn.disabled = true;
+    card.querySelectorAll('button, input').forEach((el) => { el.disabled = true; });
+    const answers = skipped
+      ? []
+      : questions.map((q) => {
+          const picked = selections.get(q.id);
+          return picked
+            ? { questionId: q.id, selectedOptionId: picked.selectedOptionId, customResponse: picked.customResponse }
+            : { questionId: q.id, selectedOptionId: null, customResponse: null };
+        });
+    try {
+      await api('/api/answer', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId, answers, skipped }),
+      });
+      const summary = document.createElement('div');
+      summary.className = 'ask-summary';
+      if (skipped) {
+        summary.textContent = 'Вопросы пропущены — помощник продолжает.';
+      } else {
+        const labels = [...selections.values()].map((item) => item.label).filter(Boolean);
+        summary.textContent = `✓ Выбрано: ${labels.join(' · ')}`;
+      }
+      actions.replaceWith(summary);
+      scrollToBottom();
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
+  skipBtn.addEventListener('click', () => finish(true));
+  submitBtn.addEventListener('click', () => finish(false));
+  actions.appendChild(skipBtn);
+  actions.appendChild(submitBtn);
+  card.appendChild(actions);
+
+  assistant.bubble.insertBefore(card, assistant.textElement);
+  scrollToBottom();
+}
+
 function renderChanges(changes) {
   const container = $('changes');
   container.innerHTML = '';
@@ -335,7 +469,8 @@ function renderChanges(changes) {
       card.className = 'change-card';
       const path = document.createElement('div');
       path.className = 'change-path';
-      path.textContent = `${change.before === null ? '＋ ' : '✎ '}${change.path}`;
+      const icon = change.after === null ? '🗑 ' : change.before === null ? '＋ ' : '✎ ';
+      path.textContent = `${icon}${change.path}`;
       card.appendChild(path);
       const details = document.createElement('details');
       const summary = document.createElement('summary');
@@ -369,6 +504,8 @@ async function renderCheckpoints(checkpoints) {
 function renderFiles() {
   const list = $('fileList');
   list.innerHTML = '';
+  const hasHtml = state.files.some((file) => /\.html?$/i.test(file.path));
+  $('previewSiteLink').hidden = !hasHtml;
   if (!state.files.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-small';
@@ -397,6 +534,11 @@ async function openFile(filePath) {
     const data = await api(`/api/file?path=${encodeURIComponent(filePath)}`);
     $('fileModalTitle').textContent = data.path;
     $('fileModalContent').textContent = data.content;
+    const isHtml = /\.html?$/i.test(filePath);
+    $('previewFileLink').hidden = !isHtml;
+    if (isHtml) {
+      $('previewFileLink').href = `/preview/${filePath.split('/').map(encodeURIComponent).join('/')}`;
+    }
     $('downloadFileLink').href = `/api/download?path=${encodeURIComponent(filePath)}`;
     $('downloadFileLink').download = filePath.split('/').pop() || 'file.txt';
     $('fileModal').hidden = false;
@@ -804,7 +946,7 @@ $('roleForm').addEventListener('submit', (event) => {
   const instructions = $('roleInstInput').value.trim();
   const tools = [];
   if ($('roleToolRead').checked) tools.push('read', 'list_files', 'search');
-  if ($('roleToolWrite').checked) tools.push('write', 'edit');
+  if ($('roleToolWrite').checked) tools.push('write', 'edit', 'delete_file');
   if ($('roleToolBash').checked) tools.push('bash');
   if (!tools.length) tools.push('read', 'list_files', 'search');
 

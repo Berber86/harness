@@ -64,8 +64,12 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .mini-button {
   border: 1px solid var(--border); background: #f4f5fa; border-radius: 8px;
   padding: 4px 8px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--accent);
+  text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
 }
 .mini-button:hover { background: var(--accent-soft); }
+.custom-model-row { display: flex; gap: 6px; margin-top: 6px; }
+.custom-model-row .field { padding: 6px 8px; font-size: 12px; }
+.custom-model-row .button { padding: 6px 10px; font-size: 12px; }
 .roles-hint { margin-top: 0; margin-bottom: 8px; }
 .roles-list { display: flex; flex-direction: column; gap: 8px; }
 .role-card {
@@ -197,7 +201,9 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .modal { position: fixed; inset: 0; background: rgba(20,22,35,.45); display: grid; place-items: center; z-index: 40; }
 .modal-window { background: white; border-radius: 16px; width: min(760px, 90vw); max-height: 80vh; overflow: hidden; display: flex; flex-direction: column; }
 .modal-window.modal-small { width: min(480px, 92vw); }
-.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; gap: 10px; }
+.modal-header-actions { display: flex; align-items: center; gap: 8px; }
+.modal-header-actions a.button { text-decoration: none; }
 .modal-body { padding: 16px 18px; overflow-y: auto; }
 .role-perms { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
 .role-perms .checkbox-label { margin-top: 0; color: var(--text); }

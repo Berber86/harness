@@ -34,6 +34,10 @@
           <option value="claude-sonnet-4.5">Claude Sonnet 4.5</option>
           <option value="demo-model">Демо (без ключа)</option>
         </select>
+        <div id="leadCustomModelRow" class="custom-model-row" hidden>
+          <input id="leadCustomModelInput" class="field" type="text" placeholder="Впиши ID модели…">
+          <button id="leadCustomModelApply" type="button" class="button button-primary">ОК</button>
+        </div>
         <div class="button-row">
           <button id="saveSettings" class="button button-secondary">Сохранить</button>
           <button id="loadModels" class="button button-secondary">Обновить список</button>
@@ -56,7 +60,10 @@
       </section>
 
       <section class="side-section">
-        <div class="section-title">Файлы песочницы</div>
+        <div class="section-header">
+          <div class="section-title">Файлы песочницы</div>
+          <a id="downloadAllLink" class="mini-button" href="/api/download-all" download="workspace.zip" title="Скачать все файлы одним архивом">⬇ Скачать ZIP</a>
+        </div>
         <div id="fileList" class="list"><div class="empty-small">Загрузка…</div></div>
       </section>
     </aside>
@@ -113,11 +120,16 @@
     <div class="modal-window">
       <div class="modal-header">
         <span id="fileModalTitle">Файл</span>
-        <button id="closeModal" class="button button-secondary">Закрыть</button>
+        <div class="modal-header-actions">
+          <a id="downloadFileLink" class="button button-primary" href="#" download>⬇ Скачать</a>
+          <button id="closeModal" class="button button-secondary">Закрыть</button>
+        </div>
       </div>
       <pre id="fileModalContent"></pre>
     </div>
   </div>
+
+  <datalist id="modelsDatalist"></datalist>
 
   <div id="roleModal" class="modal" hidden>
     <div class="modal-window modal-small">
@@ -128,6 +140,9 @@
       <form id="roleForm" class="modal-body">
         <label class="field-label" for="roleNameInput">Название роли</label>
         <input id="roleNameInput" class="field" type="text" required placeholder="Например: Тестировщик">
+
+        <label class="field-label" for="roleModelInput">Модель LLM (можно выбрать или вписать вручную)</label>
+        <input id="roleModelInput" class="field" type="text" list="modelsDatalist" required placeholder="Например: hydra-gpt-mini">
 
         <label class="field-label" for="roleDescInput">Когда вызывать (для Руководителя)</label>
         <input id="roleDescInput" class="field" type="text" required placeholder="Коротко: что делает этот помощник">

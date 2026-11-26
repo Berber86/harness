@@ -14,6 +14,7 @@ import {
   rollbackToCheckpoint,
 } from '../index.js';
 import type { AgentRole, Checkpoint, ModelProvider, RoleToolName, Tool } from '../index.js';
+import { buildZip } from './zip.js';
 
 const DEFAULT_BASE_URL = 'https://api.hydraai.ru/v1';
 const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по программированию. Отвечай по-русски, коротко и понятно.
@@ -481,6 +482,39 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
             case '/api/file': {
               const absolute = await resolveWithin(workspaceDir, url.searchParams.get('path') ?? '');
               sendJson(res, 200, { path: url.searchParams.get('path'), content: await readFile(absolute, 'utf8') });
+              return;
+            }
+            case '/api/download': {
+              const requested = url.searchParams.get('path') ?? '';
+              const absolute = await resolveWithin(workspaceDir, requested);
+              const data = await readFile(absolute);
+              const filename = path.basename(absolute).replace(/["\r\n]/g, '_');
+              res.writeHead(200, {
+                'content-type': 'application/octet-stream',
+                'content-length': data.length,
+                'content-disposition': `attachment; filename="${filename.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+              });
+              res.end(req.method === 'HEAD' ? undefined : data);
+              return;
+            }
+            case '/api/download-all': {
+              const files = await listFiles();
+              const entries = [];
+              let totalBytes = 0;
+              for (const file of files) {
+                if (totalBytes + file.size > 50 * 1024 * 1024) break;
+                const absolute = await resolveWithin(workspaceDir, file.path);
+                const data = await readFile(absolute);
+                totalBytes += data.length;
+                entries.push({ name: file.path, data });
+              }
+              const archive = buildZip(entries);
+              res.writeHead(200, {
+                'content-type': 'application/zip',
+                'content-length': archive.length,
+                'content-disposition': 'attachment; filename="workspace.zip"',
+              });
+              res.end(req.method === 'HEAD' ? undefined : archive);
               return;
             }
             case '/api/models':

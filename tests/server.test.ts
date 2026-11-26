@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { inflateRawSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -320,6 +321,51 @@ test('web app routes roles to separate LLM models and rolls back subagent change
     });
     assert.equal(rollbackResp.status, 200);
     await assert.rejects(readFile(path.join(workspaceDir, 'hello.js')), { code: 'ENOENT' });
+  } finally {
+    await close(server);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
+  }
+});
+
+test('web app downloads individual workspace files and full zip archive safely', async () => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), 'harness-web-dl-ws-'));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'harness-web-dl-sess-'));
+  await mkdir(path.join(workspaceDir, 'app'), { recursive: true });
+  await writeFile(path.join(workspaceDir, 'app', 'main.py'), 'print("привет")\n', 'utf8');
+  await writeFile(path.join(workspaceDir, 'notes.txt'), 'hello', 'utf8');
+
+  const server = createAppServer({
+    workspaceDir,
+    sessionDir,
+    webDir: path.resolve(process.cwd(), 'web'),
+  });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const fileResp = await fetch(`${base}/api/download?path=${encodeURIComponent('app/main.py')}`);
+    assert.equal(fileResp.status, 200);
+    assert.match(fileResp.headers.get('content-disposition') ?? '', /attachment/);
+    assert.equal(await fileResp.text(), 'print("привет")\n');
+
+    const escapeResp = await fetch(`${base}/api/download?path=${encodeURIComponent('../package.json')}`);
+    assert.equal(escapeResp.status, 500);
+
+    const zipResp = await fetch(`${base}/api/download-all`);
+    assert.equal(zipResp.status, 200);
+    assert.equal(zipResp.headers.get('content-type'), 'application/zip');
+    const buf = Buffer.from(await zipResp.arrayBuffer());
+    assert.equal(buf.readUInt32LE(0), 0x04034b50); // local file header
+    // Decompress first entry (app/main.py) and verify exact contents.
+    const nameLen = buf.readUInt16LE(26);
+    const extraLen = buf.readUInt16LE(28);
+    const compSize = buf.readUInt32LE(18);
+    const name = buf.subarray(30, 30 + nameLen).toString('utf8');
+    const dataOffset = 30 + nameLen + extraLen;
+    const content = inflateRawSync(buf.subarray(dataOffset, dataOffset + compSize)).toString('utf8');
+    assert.equal(name, 'app/main.py');
+    assert.equal(content, 'print("привет")\n');
   } finally {
     await close(server);
     await rm(workspaceDir, { recursive: true, force: true });

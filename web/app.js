@@ -80,7 +80,7 @@ const state = {
   controller: null,
   files: [],
   roles: loadStoredRoles(),
-  modelOptions: loadStoredModels(),
+  modelOptions: mergeCustomStoredModels(loadStoredModels()),
   editingRoleId: null,
 };
 
@@ -383,6 +383,8 @@ async function openFile(filePath) {
     const data = await api(`/api/file?path=${encodeURIComponent(filePath)}`);
     $('fileModalTitle').textContent = data.path;
     $('fileModalContent').textContent = data.content;
+    $('downloadFileLink').href = `/api/download?path=${encodeURIComponent(filePath)}`;
+    $('downloadFileLink').download = filePath.split('/').pop() || 'file.txt';
     $('fileModal').hidden = false;
   } catch (error) {
     toast(error.message);
@@ -506,6 +508,52 @@ function describePermissions(tools) {
   return 'только чтение';
 }
 
+function registerModelOption(modelId) {
+  const clean = (modelId || '').trim();
+  if (!clean) return;
+  if (!state.modelOptions.some((item) => item.value === clean)) {
+    state.modelOptions.push({ value: clean, label: clean });
+    try {
+      const saved = JSON.parse(localStorage.getItem('harness.customModels') || '[]');
+      if (Array.isArray(saved) && !saved.includes(clean)) {
+        saved.push(clean);
+        localStorage.setItem('harness.customModels', JSON.stringify(saved));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+  syncModelsDatalist();
+}
+
+function syncModelsDatalist() {
+  const datalist = $('modelsDatalist');
+  if (!datalist) return;
+  datalist.innerHTML = '';
+  for (const item of state.modelOptions) {
+    const option = document.createElement('option');
+    option.value = item.value;
+    datalist.appendChild(option);
+  }
+}
+
+function mergeCustomStoredModels(options) {
+  const result = [...options];
+  try {
+    const custom = JSON.parse(localStorage.getItem('harness.customModels') || '[]');
+    if (Array.isArray(custom)) {
+      for (const id of custom) {
+        if (typeof id === 'string' && id.trim() && !result.some((item) => item.value === id)) {
+          result.push({ value: id, label: id });
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return result;
+}
+
 function populateSelectWithModels(select, selectedValue) {
   select.innerHTML = '';
   for (const item of state.modelOptions) {
@@ -514,13 +562,18 @@ function populateSelectWithModels(select, selectedValue) {
     option.textContent = item.label;
     select.appendChild(option);
   }
-  if (selectedValue && ![...select.options].some((o) => o.value === selectedValue)) {
+  if (selectedValue && selectedValue !== '__custom__' && ![...select.options].some((o) => o.value === selectedValue)) {
     const extra = document.createElement('option');
     extra.value = selectedValue;
     extra.textContent = selectedValue;
     select.appendChild(extra);
   }
+  const customOpt = document.createElement('option');
+  customOpt.value = '__custom__';
+  customOpt.textContent = '✏️ Ввести вручную…';
+  select.appendChild(customOpt);
   if (selectedValue) select.value = selectedValue;
+  syncModelsDatalist();
 }
 
 function renderRoles() {
@@ -564,11 +617,57 @@ function renderRoles() {
     select.className = 'field role-model';
     select.disabled = !role.enabled;
     populateSelectWithModels(select, role.model || state.model);
+
+    const customRow = document.createElement('div');
+    customRow.className = 'custom-model-row';
+    customRow.hidden = true;
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.className = 'field';
+    customInput.placeholder = 'Впиши ID модели…';
+    customInput.setAttribute('list', 'modelsDatalist');
+    const customApply = document.createElement('button');
+    customApply.type = 'button';
+    customApply.className = 'button button-primary';
+    customApply.textContent = 'ОК';
+
+    const applyRoleCustomModel = () => {
+      const value = customInput.value.trim();
+      if (!value) {
+        select.value = role.model || state.model;
+        customRow.hidden = true;
+        return;
+      }
+      role.model = value;
+      registerModelOption(value);
+      saveRoles();
+      renderRoles();
+      toast(`Модель для «${role.name}»: ${value}`);
+    };
+    customApply.addEventListener('click', applyRoleCustomModel);
+    customInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyRoleCustomModel();
+      }
+    });
+    customRow.appendChild(customInput);
+    customRow.appendChild(customApply);
+
     select.addEventListener('change', () => {
+      if (select.value === '__custom__') {
+        customInput.value = role.model || '';
+        customRow.hidden = false;
+        customInput.focus();
+        customInput.select();
+        return;
+      }
+      customRow.hidden = true;
       role.model = select.value;
       saveRoles();
     });
     card.appendChild(select);
+    card.appendChild(customRow);
 
     const meta = document.createElement('div');
     meta.className = 'role-meta';
@@ -585,6 +684,7 @@ function openRoleModal(roleId = null) {
   const existing = roleId ? state.roles.find((role) => role.id === roleId) : null;
   $('roleModalTitle').textContent = existing ? `Роль: ${existing.name}` : 'Новая роль';
   $('roleNameInput').value = existing ? existing.name : '';
+  $('roleModelInput').value = existing ? (existing.model || state.model) : (state.model === 'demo-model' ? 'hydra-gpt-mini' : state.model);
   $('roleDescInput').value = existing ? existing.description : '';
   $('roleInstInput').value = existing ? existing.instructions : '';
   const tools = new Set(existing?.tools ?? ['read', 'write']);
@@ -592,6 +692,7 @@ function openRoleModal(roleId = null) {
   $('roleToolWrite').checked = tools.has('write');
   $('roleToolBash').checked = tools.has('bash');
   $('deleteRoleButton').hidden = !existing || state.roles.length <= 1;
+  syncModelsDatalist();
   $('roleModal').hidden = false;
   $('roleNameInput').focus();
 }
@@ -615,7 +716,7 @@ async function loadModels() {
   $('connectionStatus').textContent = 'Проверяю ключ…';
   try {
     const data = await api('/api/models', { headers: { 'x-api-key': key } });
-    state.modelOptions = data.models.map((id) => ({ value: id, label: id }));
+    state.modelOptions = mergeCustomStoredModels(data.models.map((id) => ({ value: id, label: id })));
     localStorage.setItem('harness.models', JSON.stringify(data.models));
     populateSelectWithModels($('model'), state.model);
     renderRoles();
@@ -630,10 +731,40 @@ async function loadModels() {
   }
 }
 
+function applyLeadCustomModel() {
+  const value = $('leadCustomModelInput').value.trim();
+  if (!value) {
+    $('leadCustomModelRow').hidden = true;
+    $('model').value = state.model;
+    return;
+  }
+  registerModelOption(value);
+  state.model = value;
+  populateSelectWithModels($('model'), value);
+  $('leadCustomModelRow').hidden = true;
+  saveSettings();
+}
+
 $('newChat').addEventListener('click', newChat);
 $('saveSettings').addEventListener('click', saveSettings);
 $('loadModels').addEventListener('click', loadModels);
-$('model').addEventListener('change', saveSettings);
+$('model').addEventListener('change', () => {
+  if ($('model').value === '__custom__') {
+    $('leadCustomModelInput').value = state.model === 'demo-model' ? '' : state.model;
+    $('leadCustomModelRow').hidden = false;
+    $('leadCustomModelInput').focus();
+    return;
+  }
+  $('leadCustomModelRow').hidden = true;
+  saveSettings();
+});
+$('leadCustomModelApply').addEventListener('click', applyLeadCustomModel);
+$('leadCustomModelInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    applyLeadCustomModel();
+  }
+});
 $('demoMode').addEventListener('change', () => {
   if ($('demoMode').checked) $('model').value = 'demo-model';
   else if ($('model').value === 'demo-model') $('model').value = 'gidra-code-auto';

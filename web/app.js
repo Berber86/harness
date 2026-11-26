@@ -1236,7 +1236,11 @@ async function loadSkills() {
     state.skills = Array.isArray(data.skills) ? data.skills : [];
     renderSkills();
   } catch {
-    // ignore if offline
+    const bar = $('skillsBar');
+    if (bar) {
+      bar.innerHTML =
+        '<span class="skills-notice">🔄 Закрой чёрное окно программы и запусти start.bat (start.command) заново, чтобы заработали навыки</span>';
+    }
   }
 }
 
@@ -1244,6 +1248,10 @@ function renderSkills() {
   const bar = $('skillsBar');
   if (!bar) return;
   bar.innerHTML = '';
+  if (!state.skills.length) {
+    bar.innerHTML = '<span class="skills-notice">В папке skills/ пока нет навыков — нажми «＋ Навык»</span>';
+    return;
+  }
   for (const skill of state.skills) {
     const chip = document.createElement('span');
     chip.className = 'skill-chip';

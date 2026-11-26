@@ -39,6 +39,14 @@ async function waitAndOpenBrowser() {
 console.log('Открываю «Мой помощник»...');
 console.log('Это чёрное окно можно свернуть, но не закрывать.');
 
+// If an earlier instance is still running on the port, ask it to exit before starting a fresh one.
+try {
+  await fetch(`http://127.0.0.1:${port}/__shutdown`, { method: 'POST', signal: AbortSignal.timeout(800) });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+} catch {
+  // Nothing listening yet, or older instance without /__shutdown.
+}
+
 const tsxCli = path.resolve('node_modules', 'tsx', 'dist', 'cli.mjs');
 const entry = path.resolve('src', 'server', 'index.ts');
 const args = existsSync(tsxCli) ? [tsxCli, entry] : ['--import', 'tsx', entry];

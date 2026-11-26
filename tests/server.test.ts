@@ -628,6 +628,7 @@ test('web app loads skills/, activates /reframe in safe read-only mode, and crea
     );
     assert.match(sysMsg?.content ?? '', /АКТИВНЫЙ НАВЫК: \/reframe/);
     assert.match(sysMsg?.content ?? '', /Перечисли ключевые термины/);
+    assert.match(sysMsg?.content ?? '', /Операционная система:/);
 
     const delResp = await fetch(`${base}/api/skills?name=reframe`, { method: 'DELETE' });
     const delJson = (await delResp.json()) as { deleted: boolean; skills: unknown[] };

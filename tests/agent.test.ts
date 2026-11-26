@@ -416,3 +416,39 @@ test('lead agent delegates to enabled role with separate model and parent checkp
     await cleanup();
   }
 });
+
+test('delegate tool warns honestly instead of claiming success when a role hits max_turns', async () => {
+  const { cwd, cleanup } = await setup();
+  try {
+    const coderProvider = new ScriptedProvider(
+      [toolCall(0, 'c1', 'write', '{"path":"a.txt","content":"1"}'), done('tool_use')],
+      [toolCall(0, 'c2', 'write', '{"path":"b.txt","content":"2"}'), done('tool_use')],
+    );
+    const delegateTool = createDelegateTool({
+      roles: [
+        {
+          id: 'coder',
+          name: 'Программист',
+          description: 'Пишет код',
+          instructions: 'Пиши код',
+          model: { provider: 'scripted', model: 'cheap-coder' },
+          enabled: true,
+          tools: ['write'],
+          maxTurns: 1,
+          provider: coderProvider,
+        },
+      ],
+    });
+
+    const out = await delegateTool.execute(
+      { role: 'coder', task: 'Сделай два файла' },
+      { cwd, sessionId: 's1' },
+    );
+    const text = typeof out === 'string' ? out : out.content;
+    assert.match(text, /статус: max_turns/);
+    assert.match(text, /Работа прервана/);
+    assert.doesNotMatch(text, /Задача выполнена/);
+  } finally {
+    await cleanup();
+  }
+});

@@ -43,10 +43,20 @@ const DEFAULT_BASE_URL = 'https://api.hydraai.ru/v1';
 const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по программированию. Отвечай по-русски, коротко и понятно.
 Рабочая папка — это песочница: меняй файлы только внутри неё.
 Перед тем как начать писать или менять код по новой задаче, сначала задай 2–3 коротких уточняющих вопроса через инструмент ask_user с вариантами ответа (если пользователь только что не ответил на твои вопросы и это не совсем маленький информационный вопрос). Это помогает сделать именно то, что нужно, без переделок и лишних трат токенов.
-Для просмотра списка файлов и поиска по коду используй list_files и search (не запускай ls/grep через bash).
-Для чтения больших файлов используй read с offset и limit. Для небольших правок используй edit вместо полной перезаписи через write — это экономит токены.
+Для просмотра списка файлов и поиска по коду используй list_files и search (не запускай ls/grep через bash). Не вызывай list_files и read повторно на файле, который ты только что прочитал и не менял.
+Для чтения больших файлов используй read с offset и limit. Для точечных правок используй edit (можно несколько вызовов за один шаг), а для небольшого файла до 250 строк при множестве правок можно сразу перезаписать его одним вызовом write.
 Если нужно удалить ненужный файл — используй delete_file (удаление можно будет откатить). Если пользователь дал ссылку на страницу — прочитай её через fetch_page.
 Инструмент bash используй только для запуска программ, тестов и сборки. Объясняй, что ты сделал.`;
+
+function describeRuntimePlatform(): string {
+  if (process.platform === 'win32') {
+    return 'Операционная система: Windows (bash запускается в cmd.exe — НЕ используй bash-синтаксис вроде `<<EOF`, `which`, `grep`, `ls`; для Node-проверок используй `node -e "..."` в двойных кавычках или `where`).';
+  }
+  if (process.platform === 'darwin') {
+    return 'Операционная система: macOS (sh/bash).';
+  }
+  return 'Операционная система: Linux (sh/bash).';
+}
 
 export interface AppServerOptions {
   workspaceDir?: string;
@@ -338,7 +348,7 @@ function normalizeRoles(raw: IncomingRole[] | undefined, fallbackModel: string):
       tools: tools && tools.length
         ? tools
         : ['read', 'edit', 'write', 'delete_file', 'list_files', 'search', 'fetch_page', 'bash'],
-      maxTurns: 8,
+      maxTurns: 16,
     });
   }
   return roles;
@@ -540,13 +550,15 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
     const mode: 'plan' | 'act' = skillInvocation?.skill.mode === 'plan' ? 'plan' : requestedMode;
     const projectRules = typeof body.rules === 'string' ? body.rules.trim().slice(0, 2000) : '';
     const leadModel = body.model?.trim() || 'demo-model';
+    const platformNote = describeRuntimePlatform();
     const allRoles = normalizeRoles(body.roles, leadModel);
     const activeRoles = allRoles
       .filter((role) => role.enabled)
       .map((role) => {
+        const baseInst = `${role.instructions}\n\n${platformNote}`;
         const instructions = projectRules
-          ? `${role.instructions}\n\nПравила проекта от пользователя:\n${projectRules}`
-          : role.instructions;
+          ? `${baseInst}\n\nПравила проекта от пользователя:\n${projectRules}`
+          : baseInst;
         if (mode !== 'plan') return { ...role, instructions };
         const readTools = (role.tools ?? []).filter((t) => READ_ONLY_ROLE_TOOLS.has(t));
         return {
@@ -636,7 +648,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       );
     }
 
-    let effectivePrompt = buildLeadSystemPrompt(systemPrompt, activeRoles);
+    let effectivePrompt = `${buildLeadSystemPrompt(systemPrompt, activeRoles)}\n\n${platformNote}`;
     if (projectRules) {
       effectivePrompt += `\n\nПравила проекта от пользователя (всегда соблюдай):\n${projectRules}`;
     }
@@ -655,7 +667,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       session,
       cwd: workspaceDir,
       systemPrompt: effectivePrompt,
-      maxTurns: 12,
+      maxTurns: 20,
       context: { maxTokens: 32_000, keepRecent: 6 },
     });
 

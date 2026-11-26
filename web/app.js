@@ -519,7 +519,7 @@ function renderAskUserCard(requestId, questions, assistant) {
   actions.appendChild(submitBtn);
   card.appendChild(actions);
 
-  assistant.bubble.insertBefore(card, assistant.textElement);
+  assistant.activity.appendChild(card);
   scrollToBottom();
 }
 
@@ -1100,6 +1100,10 @@ $('messages').addEventListener('click', (event) => {
       $('prompt').focus();
       toast('Готово для /sharpen — нажми «Отправить»');
     } else if (action === 'run') {
+      if (state.sessionId) {
+        newChat();
+        toast('Запустил в новом чистом чате, чтобы не тратить лишние токены на прошлый разбор');
+      }
       setMode('act');
       $('prompt').value = promptText;
       sendMessage(promptText);

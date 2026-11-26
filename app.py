@@ -114,6 +114,21 @@ async def on_message(message: cl.Message):
         step.output = result
         await step.update()
 
+    async def on_ask_user(question: str, options: list[str] | None) -> str:
+        if options:
+            actions = [
+                cl.Action(name=f"opt_{i}", payload={"value": opt}, label=opt)
+                for i, opt in enumerate(options)
+            ]
+            res = await cl.AskActionMessage(content=question, actions=actions).send()
+            if res and res.get("payload"):
+                return str(res["payload"].get("value", ""))
+            return "Пользователь не выбрал вариант."
+        res = await cl.AskUserMessage(content=question, timeout=300).send()
+        if res and res.get("output"):
+            return str(res["output"])
+        return "Пользователь не ответил."
+
     try:
         updated = await run_agent_turn(
             messages=messages,
@@ -122,6 +137,7 @@ async def on_message(message: cl.Message):
             on_text_delta=on_text_delta,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
+            on_ask_user=on_ask_user,
             api_base=api_base,
             api_key=api_key,
         )

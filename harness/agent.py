@@ -5,7 +5,7 @@ from typing import Any
 import litellm
 
 from harness.prompts import build_system_prompt
-from harness.tools import TOOLS_SCHEMA, execute_tool
+from harness.tools import TOOLS_SCHEMA, OnAskUser, execute_tool
 
 
 OnTextDelta = Callable[[str], Awaitable[None]]
@@ -20,6 +20,7 @@ async def run_agent_turn(
     on_text_delta: OnTextDelta,
     on_tool_start: OnToolStart,
     on_tool_end: OnToolEnd,
+    on_ask_user: OnAskUser | None = None,
     api_base: str | None = None,
     api_key: str | None = None,
     max_steps: int = 20,
@@ -86,7 +87,9 @@ async def run_agent_turn(
             fn_name = tc["function"]["name"]
             fn_args = tc["function"]["arguments"]
             step_ctx = await on_tool_start(fn_name, fn_args)
-            result = await execute_tool(workdir, fn_name, fn_args)
+            result = await execute_tool(
+                workdir, fn_name, fn_args, on_ask_user=on_ask_user
+            )
             await on_tool_end(step_ctx, result)
 
             messages.append(

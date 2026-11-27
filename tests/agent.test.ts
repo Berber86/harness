@@ -452,3 +452,39 @@ test('delegate tool warns honestly instead of claiming success when a role hits 
     await cleanup();
   }
 });
+
+test('truncated max_tokens tool JSON gives a chunking hint and recovers without false loop stop', async () => {
+  const { cwd, session, cleanup } = await setup();
+  try {
+    const provider = new ScriptedProvider(
+      [
+        toolCall(0, 'call-1', 'write', '{"path":"cat.html","content":"<html>very long truncated...'),
+        done('max_tokens'),
+      ],
+      [
+        toolCall(0, 'call-2', 'write', '{"path":"cat.html","content":"<html>short skeleton'),
+        done('max_tokens'),
+      ],
+      [
+        toolCall(0, 'call-3', 'write', '{"path":"cat.html","content":"<html><body>ok</body></html>"}'),
+        done('tool_use'),
+      ],
+      [text('Готово по частям!'), done()],
+    );
+    const agent = new Agent({
+      model: { provider: 'scripted', model: 'mock' },
+      provider,
+      session,
+      cwd,
+    });
+    const result = await agent.run('Сделай 3D модель');
+    assert.equal(result.stopReason, 'end_turn');
+    assert.equal(result.text, 'Готово по частям!');
+    assert.equal(await readFile(path.join(cwd, 'cat.html'), 'utf8'), '<html><body>ok</body></html>');
+    const firstToolMsg = session.messages.find((m) => m.role === 'tool');
+    assert.match(firstToolMsg?.content ?? '', /max_tokens/);
+    assert.match(firstToolMsg?.content ?? '', /каркас/);
+  } finally {
+    await cleanup();
+  }
+});

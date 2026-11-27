@@ -72,8 +72,15 @@ function canonicalValue(value: unknown): unknown {
   return value;
 }
 
-function callSignature(calls: ToolCall[]): string {
-  return JSON.stringify(calls.map((call) => ({ name: call.name, arguments: canonicalValue(call.arguments) })));
+function callSignature(calls: ToolCall[], rawByCallId?: Map<string, string>): string {
+  return JSON.stringify(
+    calls.map((call) => {
+      const raw = rawByCallId?.get(call.id);
+      return raw !== undefined
+        ? { name: call.name, invalidRawLength: raw.length, invalidRawTail: raw.slice(-80) }
+        : { name: call.name, arguments: canonicalValue(call.arguments) };
+    }),
+  );
 }
 
 /**
@@ -212,6 +219,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<A
     lastText = text;
 
     const invalidArguments = new Map<string, string>();
+    const rawInvalidArgs = new Map<string, string>();
     const calls: ToolCall[] = [...pending.values()]
       .sort((a, b) => a.index - b.index)
       .map((entry) => {
@@ -225,6 +233,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<A
           args = parsed as Record<string, unknown>;
         } catch (error) {
           invalidArguments.set(id, toError(error).message);
+          rawInvalidArgs.set(id, entry.arguments);
         }
         return { id, name: entry.name ?? 'unknown', arguments: args };
       });
@@ -244,7 +253,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<A
     hasMoreTools = calls.length > 0 && !failed;
     if (!hasMoreTools) break;
 
-    const signature = callSignature(calls);
+    const signature = callSignature(calls, rawInvalidArgs);
     repeatedCount = signature === previousSignature ? repeatedCount + 1 : 1;
     previousSignature = signature;
 
@@ -284,7 +293,11 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<A
       const parseError = invalidArguments.get(call.id);
       try {
         if (parseError) {
-          result = failedResult(call, `Invalid tool arguments: ${parseError}`);
+          const truncatedHint =
+            streamStop === 'max_tokens' || streamStop === 'length'
+              ? ' Ответ модели обрезался по лимиту длины (max_tokens), поэтому JSON не закрылся. Не отправляй большой файл целиком в одном write: сначала запиши короткий каркас через write (до ~150 строк), а остальные блоки добавляй через edit, или разбей код на отдельные файлы.'
+              : '';
+          result = failedResult(call, `Invalid tool arguments: ${parseError}.${truncatedHint}`);
         } else if (!tool) {
           result = failedResult(call, `Unknown tool: ${call.name}`);
         } else if (authorize && !(await authorize(call))) {

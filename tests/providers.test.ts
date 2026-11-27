@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { anthropicProvider, openaiCompatibleProvider } from '../src/index.js';
+import { anthropicProvider, openaiCompatibleProvider, toOpenAIMessages } from '../src/index.js';
 import type { ProviderStreamEvent } from '../src/index.js';
 import { collect } from './helpers.js';
 
@@ -120,4 +120,55 @@ test('provider reports HTTP errors as error events', async () => {
   const events = await collect(provider.chat({ model, messages, tools: [] }));
   assert.equal(events.length, 1);
   assert.ok(events[0]?.type === 'error' && /401/.test(events[0].error.message));
+});
+
+test('OpenAI-compatible provider retries transient fetch failed errors and exposes cause on persistent failure', async () => {
+  let calls = 0;
+  let retryHeaders: Record<string, string> | undefined;
+  const recoveringFetch: typeof fetch = async (_input, init) => {
+    calls++;
+    if (calls === 1) {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('other side closed'), { code: 'ECONNRESET' }),
+      });
+    }
+    retryHeaders = init?.headers as Record<string, string>;
+    return sseResponse([
+      ['message', { choices: [{ delta: { content: 'Recovered' }, index: 0 }] }],
+      ['message', { choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] }],
+      ['message', '[DONE]'],
+    ]);
+  };
+  const okProvider = openaiCompatibleProvider({ apiKey: 'k', fetch: recoveringFetch });
+  const okEvents = await collect(okProvider.chat({ model, messages, tools: [] }));
+  assert.equal(calls, 2);
+  assert.equal(retryHeaders?.connection, 'close');
+  assert.equal(okEvents[0]?.type === 'text_delta' && okEvents[0].text, 'Recovered');
+
+  const failingFetch: typeof fetch = async () => {
+    throw new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ETIMEDOUT 1.2.3.4:443'), { code: 'ETIMEDOUT' }),
+    });
+  };
+  const failProvider = openaiCompatibleProvider({ apiKey: 'k', fetch: failingFetch });
+  const failEvents = await collect(failProvider.chat({ model, messages, tools: [] }));
+  assert.equal(failEvents.length, 1);
+  assert.ok(
+    failEvents[0]?.type === 'error' &&
+      /fetch failed/.test(failEvents[0].error.message) &&
+      /ETIMEDOUT/.test(failEvents[0].error.message),
+  );
+});
+
+test('toOpenAIMessages converts mid-conversation system updates into system-reminder user messages', () => {
+  const mapped = toOpenAIMessages([
+    { id: 's0', role: 'system', content: 'HEAD', createdAt: 0 },
+    { id: 'u1', role: 'user', content: 'hi', createdAt: 1 },
+    { id: 's1', role: 'system', content: 'MODE: ACT', createdAt: 2 },
+    { id: 'u2', role: 'user', content: 'do it', createdAt: 3 },
+  ]);
+  assert.equal(mapped[0]?.role, 'system');
+  assert.equal(mapped[1]?.role, 'user');
+  assert.equal(mapped[2]?.role, 'user');
+  assert.match(String(mapped[2]?.content), /<system-reminder>[\s\S]*MODE: ACT/);
 });

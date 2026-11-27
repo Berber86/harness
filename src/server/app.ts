@@ -602,7 +602,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
     const controller = new AbortController();
     let finished = false;
     res.on('close', () => {
-      if (!finished) controller.abort();
+      if (!finished && !res.writableEnded) controller.abort();
     });
 
     const askUserTool = createAskUserTool((questions, signal) => {

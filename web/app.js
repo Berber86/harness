@@ -282,6 +282,7 @@ async function sendMessage(promptText) {
   const controller = new AbortController();
   state.controller = controller;
   let fullText = '';
+  let lastErrorMessage = '';
 
   try {
     const response = await fetch('/api/chat', {
@@ -338,6 +339,7 @@ async function sendMessage(promptText) {
           addNotice(event.text);
           break;
         case 'error':
+          lastErrorMessage = event.message || '';
           toast(event.message);
           appendActivity(assistant.activity, `Ошибка: ${event.message}`);
           break;
@@ -366,7 +368,15 @@ async function sendMessage(promptText) {
             assistant.bubble.appendChild(note);
           }
           if (event.result.stopReason === 'error' && !fullText) {
-            appendActivity(assistant.activity, 'Задача не выполнена. Проверь ключ и попробуй ещё раз.');
+            const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|UND_ERR|socket|502|503|504/i.test(
+              lastErrorMessage,
+            );
+            appendActivity(
+              assistant.activity,
+              isNetworkError
+                ? 'Не удалось связаться с сервером модели (обрыв соединения, таймаут или VPN/прокси). Попробуй отправить ещё раз.'
+                : 'Задача не выполнена. Проверь ключ и попробуй ещё раз.',
+            );
           } else if (event.result.stopReason === 'loop_detected' && !fullText) {
             fullText =
               'Кажется, я хожу по кругу — остановился, чтобы не тратить лишние токены. Подскажи, пожалуйста, как лучше действовать, или начни новый чат.';

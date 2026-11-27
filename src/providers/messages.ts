@@ -60,15 +60,23 @@ export function toAnthropicMessages(messages: Message[]): {
 /** Converts universal messages to the OpenAI-compatible chat format. */
 export function toOpenAIMessages(messages: Message[]): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
+  let seenConversation = false;
   for (const message of messages) {
     switch (message.role) {
       case 'system':
-        result.push({ role: 'system', content: message.content });
+        if (seenConversation) {
+          // Many OpenAI-compatible gateways reject mid-conversation system roles.
+          result.push({ role: 'user', content: `<system-reminder>\n${message.content}\n</system-reminder>` });
+        } else {
+          result.push({ role: 'system', content: message.content });
+        }
         break;
       case 'user':
+        seenConversation = true;
         result.push({ role: 'user', content: message.content });
         break;
       case 'assistant':
+        seenConversation = true;
         result.push({
           role: 'assistant',
           content: message.content,
@@ -84,6 +92,7 @@ export function toOpenAIMessages(messages: Message[]): Array<Record<string, unkn
         });
         break;
       case 'tool':
+        seenConversation = true;
         for (const toolResult of message.toolResults ?? []) {
           result.push({
             role: 'tool',

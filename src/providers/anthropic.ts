@@ -1,4 +1,5 @@
 import type { ChatRequest, ModelProvider, ProviderStreamEvent, StopReason } from '../types.js';
+import { fetchWithRetry, formatNetworkError } from './fetch-retry.js';
 import { toAnthropicMessages } from './messages.js';
 import { parseSSE } from './sse.js';
 
@@ -48,18 +49,18 @@ export function anthropicProvider(options: AnthropicOptions = {}): ModelProvider
 
       let response: Response;
       try {
-        response = await fetchImpl(`${baseURL}/messages`, {
+        response = await fetchWithRetry(fetchImpl, `${baseURL}/messages`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-api-key': apiKey,
+            'x-api-key': apiKey.trim(),
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(body),
           signal: request.signal,
         });
       } catch (error) {
-        yield { type: 'error', error: error instanceof Error ? error : new Error(String(error)) };
+        yield { type: 'error', error: formatNetworkError(error) };
         return;
       }
       if (!response.ok) {
@@ -125,7 +126,7 @@ export function anthropicProvider(options: AnthropicOptions = {}): ModelProvider
           }
         }
       } catch (error) {
-        yield { type: 'error', error: error instanceof Error ? error : new Error(String(error)) };
+        yield { type: 'error', error: formatNetworkError(error) };
       }
     },
   };

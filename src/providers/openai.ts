@@ -1,4 +1,5 @@
 import type { ChatRequest, ModelProvider, ProviderStreamEvent, StopReason, Usage } from '../types.js';
+import { fetchWithRetry, formatNetworkError } from './fetch-retry.js';
 import { toOpenAIMessages } from './messages.js';
 import { parseSSE } from './sse.js';
 
@@ -48,17 +49,17 @@ export function openaiCompatibleProvider(options: OpenAICompatibleOptions = {}):
 
       let response: Response;
       try {
-        response = await fetchImpl(`${baseURL}/chat/completions`, {
+        response = await fetchWithRetry(fetchImpl, `${baseURL}/chat/completions`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+            ...(apiKey ? { authorization: `Bearer ${apiKey.trim()}` } : {}),
           },
           body: JSON.stringify(body),
           signal: request.signal,
         });
       } catch (error) {
-        yield { type: 'error', error: error instanceof Error ? error : new Error(String(error)) };
+        yield { type: 'error', error: formatNetworkError(error) };
         return;
       }
       if (!response.ok) {
@@ -109,7 +110,7 @@ export function openaiCompatibleProvider(options: OpenAICompatibleOptions = {}):
           }
         }
       } catch (error) {
-        yield { type: 'error', error: error instanceof Error ? error : new Error(String(error)) };
+        yield { type: 'error', error: formatNetworkError(error) };
         return;
       }
       yield { type: 'done', stopReason: finishReason, usage };

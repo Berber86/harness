@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { Agent, Session, buildLeadSystemPrompt, createDefaultTools, createDelegateTool } from '../src/index.js';
+import { Agent, Session, buildLeadSystemPrompt, compactIfNeeded, createDefaultTools, createDelegateTool } from '../src/index.js';
 import type { AgentEvent, AgentRole, ProviderStreamEvent } from '../src/index.js';
 import { MemoryStore, ScriptedProvider } from './helpers.js';
 
@@ -484,6 +484,78 @@ test('truncated max_tokens tool JSON gives a chunking hint and recovers without 
     const firstToolMsg = session.messages.find((m) => m.role === 'tool');
     assert.match(firstToolMsg?.content ?? '', /max_tokens/);
     assert.match(firstToolMsg?.content ?? '', /каркас/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('micro-compaction shrinks bulky old tool outputs without calling LLM and never splits tool pairs', async () => {
+  const { session, cleanup } = await setup();
+  try {
+    session.messages.push(
+      { id: 'u1', role: 'user', content: 'start', createdAt: 1 },
+      { id: 'a1', role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'read', arguments: { path: 'a.txt' } }], createdAt: 2 },
+      { id: 't1', role: 'tool', content: 'line '.repeat(500), toolResults: [{ toolCallId: 'c1', name: 'read', content: 'line '.repeat(500) }], createdAt: 3 },
+      { id: 'a2', role: 'assistant', content: '', toolCalls: [{ id: 'c2', name: 'read', arguments: { path: 'b.txt' } }], createdAt: 4 },
+      { id: 't2', role: 'tool', content: 'recent', toolResults: [{ toolCallId: 'c2', name: 'read', content: 'recent' }], createdAt: 5 },
+    );
+    const provider = new ScriptedProvider([text('summary'), done()]);
+    const result = await compactIfNeeded(
+      session,
+      provider,
+      { provider: 'scripted', model: 'mock' },
+      { maxTokens: 400, keepRecent: 1 },
+    );
+    assert.ok(result);
+    assert.equal(result.mode, 'micro');
+    assert.equal(provider.requests.length, 0);
+    assert.match(session.messages[2]!.content, /скрыт для экономии/);
+    assert.equal(session.messages[4]!.content, 'recent');
+
+    // Now force summary compaction with keepRecent=1: must pull back before t2 so a2+t2 stay together.
+    const forced = await compactIfNeeded(
+      session,
+      provider,
+      { provider: 'scripted', model: 'mock' },
+      { maxTokens: 400, keepRecent: 1, force: true },
+    );
+    assert.ok(forced);
+    assert.equal(forced.mode, 'summary');
+    const keptAssistant = session.messages.find((m) => m.id === 'a2');
+    const keptTool = session.messages.find((m) => m.id === 't2');
+    assert.ok(keptAssistant && keptTool);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('dynamicSystemPrompt preserves the head system message for KV/prompt caching', async () => {
+  const { cwd, session, cleanup } = await setup();
+  try {
+    const provider = new ScriptedProvider([text('ok1'), done()], [text('ok2'), done()]);
+    const a1 = new Agent({
+      model: { provider: 'scripted', model: 'mock' },
+      provider,
+      session,
+      cwd,
+      systemPrompt: 'STABLE_HEAD',
+      dynamicSystemPrompt: 'MODE: PLAN',
+    });
+    await a1.run('step 1');
+
+    const a2 = new Agent({
+      model: { provider: 'scripted', model: 'mock' },
+      provider,
+      session,
+      cwd,
+      systemPrompt: 'STABLE_HEAD',
+      dynamicSystemPrompt: 'MODE: ACT',
+    });
+    await a2.run('step 2');
+
+    assert.equal(session.messages[0]?.content, 'STABLE_HEAD');
+    const updates = session.messages.filter((m) => m.meta?.kind === 'system_update').map((m) => m.content);
+    assert.deepEqual(updates, ['MODE: PLAN', 'MODE: ACT']);
   } finally {
     await cleanup();
   }

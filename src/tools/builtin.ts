@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Tool } from '../types.js';
 import { resolveWithin, truncate } from '../utils.js';
+import { checkBashCommandSafety } from './safety.js';
 
 const execAsync = promisify(exec);
 const MAX_OUTPUT = 12_000;
@@ -314,6 +315,8 @@ export function createSearchTool(): Tool<{
 export interface BashToolOptions {
   timeout?: number;
   maxBuffer?: number;
+  /** Disable the pre-execution safety guard when explicitly intended. */
+  allowUnsafe?: boolean;
 }
 
 export function createBashTool(options: BashToolOptions = {}): Tool<{
@@ -324,7 +327,7 @@ export function createBashTool(options: BashToolOptions = {}): Tool<{
   return {
     name: 'bash',
     description:
-      'Run a shell command inside the workspace. Use for builds, tests and running scripts. Changes made by shell commands are not captured by checkpoints.',
+      'Run a shell command inside the workspace. Use for builds, tests and running scripts. Destructive commands or paths outside workspace are blocked.',
     parameters: {
       type: 'object',
       properties: {
@@ -335,6 +338,15 @@ export function createBashTool(options: BashToolOptions = {}): Tool<{
       required: ['command'],
     },
     async execute(args, context) {
+      if (!options.allowUnsafe) {
+        const check = checkBashCommandSafety(args.command);
+        if (!check.safe) {
+          return {
+            content: `Команда заблокирована фильтром безопасности: ${check.reason}`,
+            isError: true,
+          };
+        }
+      }
       const cwd = args.cwd ? await resolveWithin(context.cwd, args.cwd) : await resolveWithin(context.cwd, '.');
       try {
         const { stdout, stderr } = await execAsync(args.command, {

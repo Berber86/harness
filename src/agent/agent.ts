@@ -17,6 +17,7 @@ export interface AgentOptions {
   providers?: Record<string, ModelProvider>;
   tools?: Tool[];
   systemPrompt?: string;
+  dynamicSystemPrompt?: string;
   session?: Session;
   store?: SessionStore;
   sessionDir?: string;
@@ -64,6 +65,7 @@ export class Agent {
         tools: options.tools ?? createDefaultTools(),
         cwd: options.cwd ?? process.cwd(),
         ...(options.systemPrompt ? { systemPrompt: options.systemPrompt } : {}),
+        ...(options.dynamicSystemPrompt ? { dynamicSystemPrompt: options.dynamicSystemPrompt } : {}),
         ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
         ...(options.context ? { context: options.context } : {}),
         ...(options.loopDetection ? { loopDetection: options.loopDetection } : {}),

@@ -522,11 +522,12 @@ test('web app enforces read-only plan mode, passes project rules, tracks usage a
     assert.ok(toolNames.includes('list_files'));
     assert.ok(toolNames.includes('ask_user'));
 
-    const sysMsg = (provider.requests[0]!.messages as Array<{ role: string; content: string }>).find(
-      (m) => m.role === 'system',
-    );
-    assert.match(sysMsg?.content ?? '', /Всегда отвечай максимально просто/);
-    assert.match(sysMsg?.content ?? '', /РЕЖИМ «ТОЛЬКО ПЛАН»/);
+    const sysAll = (provider.requests[0]!.messages as Array<{ role: string; content: string }>)
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n');
+    assert.match(sysAll, /Всегда отвечай максимально просто/);
+    assert.match(sysAll, /РЕЖИМ «ТОЛЬКО ПЛАН»/);
 
     const sessionId = planDone.result.sessionId as string;
     for (const prompt of ['Сообщение 2', 'Сообщение 3', 'Сообщение 4']) {
@@ -623,12 +624,13 @@ test('web app loads skills/, activates /reframe in safe read-only mode, and crea
     assert.ok(toolNames.includes('read'));
     assert.ok(toolNames.includes('fetch_page'));
 
-    const sysMsg = (provider.requests[0]!.messages as Array<{ role: string; content: string }>).find(
-      (m) => m.role === 'system',
-    );
-    assert.match(sysMsg?.content ?? '', /АКТИВНЫЙ НАВЫК: \/reframe/);
-    assert.match(sysMsg?.content ?? '', /Перечисли ключевые термины/);
-    assert.match(sysMsg?.content ?? '', /Операционная система:/);
+    const sysAll = (provider.requests[0]!.messages as Array<{ role: string; content: string }>)
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n');
+    assert.match(sysAll, /АКТИВНЫЙ НАВЫК: \/reframe/);
+    assert.match(sysAll, /Перечисли ключевые термины/);
+    assert.match(sysAll, /Операционная система:/);
 
     const delResp = await fetch(`${base}/api/skills?name=reframe`, { method: 'DELETE' });
     const delJson = (await delResp.json()) as { deleted: boolean; skills: unknown[] };
@@ -639,5 +641,76 @@ test('web app loads skills/, activates /reframe in safe read-only mode, and crea
     await rm(workspaceDir, { recursive: true, force: true });
     await rm(sessionDir, { recursive: true, force: true });
     await rm(skillsDir, { recursive: true, force: true });
+  }
+});
+
+test('web app streams todo_write checklist updates and preserves head system prompt across mode switch', async () => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), 'harness-web-todo-ws-'));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'harness-web-todo-sess-'));
+
+  const provider = new ScriptedProvider(
+    [
+      {
+        type: 'tool_call',
+        index: 0,
+        id: 't-1',
+        name: 'todo_write',
+        argumentsDelta: JSON.stringify({
+          todos: [
+            { content: 'Сделать тело', status: 'in_progress' },
+            { content: 'Проверить сцену', status: 'pending' },
+          ],
+        }),
+      },
+      { type: 'done', stopReason: 'tool_use' },
+    ],
+    [{ type: 'text_delta', text: 'План записан.' }, { type: 'done', stopReason: 'end_turn' }],
+    [{ type: 'text_delta', text: 'Перешёл в действие.' }, { type: 'done', stopReason: 'end_turn' }],
+  );
+
+  const server = createAppServer({
+    workspaceDir,
+    sessionDir,
+    webDir: path.resolve(process.cwd(), 'web'),
+    providerFactory: () => provider,
+  });
+  const port = await listen(server);
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const r1 = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Задача 1', apiKey: 'k', model: 'm', mode: 'plan' }),
+    });
+    const events = (await r1.text())
+      .split('\n\n')
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+    const todoEv = events.find((e: { type: string }) => e.type === 'todo');
+    assert.equal(todoEv?.todos?.length, 2);
+    const doneEv = events.find((e: { type: string }) => e.type === 'done');
+    const sessionId = doneEv.result.sessionId as string;
+
+    const r2 = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Задача 2', apiKey: 'k', model: 'm', mode: 'act', sessionId }),
+    });
+    await r2.text();
+
+    // KV-cache check: the very first system message must stay identical between plan and act requests.
+    const firstSys1 = (provider.requests[0]!.messages as Array<{ role: string; content: string }>)[0]!.content;
+    const firstSys2 = (provider.requests[2]!.messages as Array<{ role: string; content: string }>)[0]!.content;
+    assert.equal(firstSys1, firstSys2);
+
+    const sResp = await fetch(`${base}/api/session?id=${encodeURIComponent(sessionId)}`);
+    const sJson = (await sResp.json()) as { session: { todos: Array<{ content: string }> } };
+    assert.equal(sJson.session.todos.length, 2);
+    assert.equal(sJson.session.todos[0]!.content, 'Сделать тело');
+  } finally {
+    await close(server);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
   }
 });

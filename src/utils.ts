@@ -96,5 +96,10 @@ export function validateArguments(
 }
 
 export function truncate(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit)}\n… [truncated ${text.length - limit} chars]`;
+  if (text.length <= limit) return text;
+  if (limit < 200) return `${text.slice(0, limit)}\n… [truncated ${text.length - limit} chars]`;
+  const head = Math.floor(limit * 0.65);
+  const tail = Math.floor(limit * 0.25);
+  const omitted = text.length - head - tail;
+  return `${text.slice(0, head)}\n… [${omitted} chars omitted] …\n${text.slice(-tail)}`;
 }

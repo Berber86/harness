@@ -37,7 +37,10 @@ export interface AgentLoopOptions {
   model: ModelConfig;
   tools: Tool[];
   cwd: string;
+  /** Stable prefix system prompt kept immutable for KV/prompt caching. */
   systemPrompt?: string;
+  /** Changing per-turn context (mode, active skill, rules, team roster) appended only when changed. */
+  dynamicSystemPrompt?: string;
   maxTurns?: number;
   context?: ContextOptions;
   loopDetection?: LoopDetectionOptions;
@@ -127,8 +130,23 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<A
         meta: { kind: 'system_prompt' },
       });
       await session.save();
-    } else if (existingSystem.content !== systemPrompt) {
+    } else if (options.dynamicSystemPrompt === undefined && existingSystem.content !== systemPrompt) {
+      // Legacy callers without dynamicSystemPrompt keep mutating system_prompt on explicit change.
       existingSystem.content = systemPrompt;
+      await session.save();
+    }
+  }
+  const dynamicPrompt = options.dynamicSystemPrompt?.trim();
+  if (dynamicPrompt) {
+    const lastUpdate = [...session.messages].reverse().find((m) => m.meta?.kind === 'system_update');
+    if (lastUpdate?.content !== dynamicPrompt) {
+      session.addMessage({
+        id: newId(),
+        role: 'system',
+        content: dynamicPrompt,
+        createdAt: Date.now(),
+        meta: { kind: 'system_update' },
+      });
       await session.save();
     }
   }

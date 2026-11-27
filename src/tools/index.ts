@@ -18,3 +18,7 @@ export type {
   AskUserHandler,
   AskUserResponse,
 } from './ask.js';
+export { createTodoWriteTool } from './todo.js';
+export type { TodoItem, TodoStatus } from './todo.js';
+export { checkBashCommandSafety } from './safety.js';
+export type { CommandSafetyResult } from './safety.js';

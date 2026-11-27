@@ -331,6 +331,9 @@ async function sendMessage(promptText) {
         case 'ask_user':
           renderAskUserCard(event.requestId, event.questions, assistant);
           break;
+        case 'todo':
+          renderTodos(event.todos);
+          break;
         case 'notice':
           addNotice(event.text);
           break;
@@ -662,6 +665,34 @@ function markActiveSession() {
   });
 }
 
+function renderTodos(todos) {
+  const section = $('todoSection');
+  const title = $('todoTitle');
+  const list = $('todoList');
+  if (!section || !title || !list) return;
+  if (!Array.isArray(todos) || !todos.length) {
+    section.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+  const done = todos.filter((item) => item.status === 'completed').length;
+  title.textContent = `План задачи (${done}/${todos.length})`;
+  list.innerHTML = '';
+  for (const item of todos) {
+    const row = document.createElement('div');
+    row.className = `todo-item ${item.status || 'pending'}`;
+    const icon = document.createElement('span');
+    icon.className = 'todo-icon';
+    icon.textContent = item.status === 'completed' ? '✅' : item.status === 'in_progress' ? '⏳' : '⬜';
+    const text = document.createElement('span');
+    text.textContent = item.content;
+    row.appendChild(icon);
+    row.appendChild(text);
+    list.appendChild(row);
+  }
+  section.hidden = false;
+}
+
 async function openSession(id) {
   if (state.busy) return;
   try {
@@ -676,6 +707,7 @@ async function openSession(id) {
     if (!shown.length) addMessage('user', 'Новый чат');
     for (const message of shown) addMessage(message.role, message.content);
     await renderCheckpoints(data.session.checkpoints);
+    renderTodos(data.session.todos || []);
     $('chatTitle').textContent = `Чат ${id.slice(0, 8)}`;
     markActiveSession();
     scrollToBottom();
@@ -691,6 +723,7 @@ function newChat() {
   state.contextTokens = 0;
   state.sessionTokens = 0;
   updateTokenBadge();
+  renderTodos([]);
   $('compactButton').hidden = true;
   $('messages').innerHTML = welcomeHtml;
   $('chatTitle').textContent = 'Новый чат';

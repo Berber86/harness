@@ -16,6 +16,7 @@ import {
   createListFilesTool,
   createReadTool,
   createSearchTool,
+  createTodoWriteTool,
   deleteSkill,
   estimateSessionTokens,
   loadSkills,
@@ -34,6 +35,7 @@ import type {
   ModelProvider,
   RoleToolName,
   SkillMode,
+  TodoItem,
   Tool,
   Usage,
 } from '../index.js';
@@ -54,6 +56,7 @@ const DEFAULT_SYSTEM_PROMPT = `Ты дружелюбный помощник по
 Рабочая папка — это песочница: меняй файлы только внутри неё.
 Перед тем как начать писать или менять код по новой задаче, сначала задай 2–3 коротких уточняющих вопроса через инструмент ask_user с вариантами ответа (если пользователь только что не ответил на твои вопросы и это не совсем маленький информационный вопрос). Это помогает сделать именно то, что нужно, без переделок и лишних трат токенов.
 Для просмотра списка файлов и поиска по коду используй list_files и search (не запускай ls/grep через bash). Не вызывай list_files и read повторно на файле, который ты только что прочитал и не менял.
+Для сложных задач из 3 и более шагов сначала заведи короткий чек-лист через todo_write и отмечай прогресс (in_progress → completed), чтобы ничего не забыть в конце.
 Для чтения больших файлов используй read с offset и limit. Для точечных правок используй edit (можно несколько вызовов за один шаг), а для небольшого файла до 200 строк при множестве правок можно сразу перезаписать его одним вызовом write. Если же нужно создать большой файл (3D-сцена, игра, крупный экран больше ~200 строк), не пытайся уместить всё в один гигантский write — сначала запиши компактный каркас через write, а затем дополни его через edit или разбей на отдельные файлы.
 Если нужно удалить ненужный файл — используй delete_file (удаление можно будет откатить). Если пользователь дал ссылку на страницу — прочитай её через fetch_page.
 Инструмент bash используй только для запуска программ, тестов и сборки. Объясняй, что ты сделал.`;
@@ -628,11 +631,17 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       });
     });
 
+    const todoTool = createTodoWriteTool(async (todos: TodoItem[]) => {
+      session.metadata.todos = todos;
+      await session.save();
+      sendSse(res, { type: 'todo', todos });
+    });
+
     const baseTools: Tool[] =
       mode === 'plan'
         ? [createReadTool(), createListFilesTool(), createSearchTool(), createFetchPageTool()]
         : createDefaultTools();
-    const tools: Tool[] = [...baseTools, askUserTool];
+    const tools: Tool[] = [...baseTools, askUserTool, todoTool];
     if (activeRoles.length) {
       tools.push(
         createDelegateTool({
@@ -663,16 +672,22 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       );
     }
 
-    let effectivePrompt = `${buildLeadSystemPrompt(systemPrompt, activeRoles)}\n\n${platformNote}`;
+    // Keep the head systemPrompt immutable for KV/prompt caching across mode/skill switches.
+    const stableHeadPrompt = `${systemPrompt}\n\n${platformNote}`;
+    const dynamicParts: string[] = [];
+    if (activeRoles.length) {
+      dynamicParts.push(buildLeadSystemPrompt('', activeRoles).trim());
+    }
     if (projectRules) {
-      effectivePrompt += `\n\nПравила проекта от пользователя (всегда соблюдай):\n${projectRules}`;
+      dynamicParts.push(`Правила проекта от пользователя (всегда соблюдай):\n${projectRules}`);
     }
     if (skillInvocation) {
-      effectivePrompt += `\n\n${buildSkillSystemPrompt(skillInvocation.skill)}`;
+      dynamicParts.push(buildSkillSystemPrompt(skillInvocation.skill));
     }
     if (mode === 'plan' && !skillInvocation) {
-      effectivePrompt +=
-        '\n\nРЕЖИМ «ТОЛЬКО ПЛАН»: сейчас запрещено менять или удалять файлы и запускать команды. Изучи проект доступными инструментами чтения, при необходимости уточни детали через ask_user и составь понятный пошаговый план. В конце предложи пользователю переключиться в режим «Действие», чтобы приступить к выполнению.';
+      dynamicParts.push(
+        'РЕЖИМ «ТОЛЬКО ПЛАН»: сейчас запрещено менять или удалять файлы и запускать команды. Изучи проект доступными инструментами чтения, при необходимости уточни детали через ask_user и составь понятный пошаговый план. В конце предложи пользователю переключиться в режим «Действие», чтобы приступить к выполнению.',
+      );
     }
 
     const agent = new Agent({
@@ -681,7 +696,8 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       tools,
       session,
       cwd: workspaceDir,
-      systemPrompt: effectivePrompt,
+      systemPrompt: stableHeadPrompt,
+      dynamicSystemPrompt: dynamicParts.join('\n\n'),
       maxTurns: 20,
       context: { maxTokens: 32_000, keepRecent: 6 },
     });
@@ -728,6 +744,11 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
               sendSse(res, {
                 type: 'activity',
                 text: '❓ Задаю уточняющие вопросы…',
+              });
+            } else if (event.call.name === 'todo_write') {
+              sendSse(res, {
+                type: 'activity',
+                text: '📋 Обновляю чек-лист задачи…',
               });
             } else {
               sendSse(res, {
@@ -825,6 +846,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
                   checkpoints: session.checkpoints.map(publicCheckpoint),
                   usage: getSessionUsage(session),
                   contextTokens: estimateSessionTokens(session),
+                  todos: Array.isArray(session.metadata.todos) ? session.metadata.todos : [],
                 },
               });
               return;

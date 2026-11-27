@@ -322,4 +322,18 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .update-box.bad { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
 .update-actions { flex-wrap: wrap; }
 
+.todo-section { margin-bottom: 18px; }
+.todo-list { display: flex; flex-direction: column; gap: 6px; }
+.todo-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 7px 9px; border-radius: 9px; border: 1px solid var(--border);
+  background: #fbfbfe; font-size: 12px; line-height: 1.4;
+}
+.todo-item.in_progress {
+  border-color: #c7c2ff; background: #f5f3ff; font-weight: 600; color: #3b2fb8;
+}
+.todo-item.completed { color: var(--muted); opacity: .82; text-decoration: line-through; }
+.todo-icon { flex-shrink: 0; }
+
+
 

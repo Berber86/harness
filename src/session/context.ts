@@ -17,7 +17,10 @@ export interface CompactionResult {
   removedMessages: number;
   tokensBefore: number;
   tokensAfter: number;
+  mode?: 'micro' | 'summary';
 }
+
+const MICRO_COMPACT_THRESHOLD = 400;
 
 function tokensIn(message: Message): number {
   const extras = message.toolCalls || message.toolResults
@@ -28,6 +31,46 @@ function tokensIn(message: Message): number {
 
 export function estimateSessionTokens(session: Session): number {
   return session.messages.reduce((total, message) => total + tokensIn(message), 0);
+}
+
+/** Ensures we never split a recent slice right between an assistant's toolCalls and its toolResults. */
+function findSafeRecentStart(rest: Message[], desiredKeep: number): number {
+  let idx = Math.max(0, rest.length - desiredKeep);
+  while (idx > 0 && rest[idx]?.role === 'tool') {
+    idx--;
+  }
+  return idx;
+}
+
+/** Replaces bulky tool outputs older than `recentStart` with compact placeholders at zero LLM cost. */
+function microCompactOlderToolResults(rest: Message[], recentStart: number): number {
+  let compactedCount = 0;
+  for (let i = 0; i < recentStart; i++) {
+    const msg = rest[i]!;
+    if (msg.role !== 'tool' || msg.meta?.microCompacted) continue;
+    const rawLen = msg.content.length;
+    const hasLongResult =
+      rawLen > MICRO_COMPACT_THRESHOLD ||
+      Boolean(msg.toolResults?.some((r) => r.content.length > MICRO_COMPACT_THRESHOLD));
+    if (!hasLongResult) continue;
+
+    const toolName = msg.toolResults?.[0]?.name ?? 'tool';
+    const placeholder = `[Старый результат «${toolName}» скрыт для экономии (${rawLen} симв.). При необходимости вызови инструмент снова.]`;
+    msg.content = placeholder;
+    if (msg.toolResults) {
+      msg.toolResults = msg.toolResults.map((r) =>
+        r.content.length > MICRO_COMPACT_THRESHOLD
+          ? {
+              ...r,
+              content: `[Старый результат «${r.name ?? toolName}» скрыт (${r.content.length} симв.)]`,
+            }
+          : r,
+      );
+    }
+    msg.meta = { ...msg.meta, microCompacted: true };
+    compactedCount++;
+  }
+  return compactedCount;
 }
 
 async function summarize(
@@ -72,16 +115,38 @@ export async function compactIfNeeded(
   const rest = session.messages.slice(leadingSystem);
 
   let keep = Math.max(1, options.keepRecent ?? 6);
+  let recentStart = findSafeRecentStart(rest, keep);
   while (
-    keep > 1 &&
-    [...protectedMessages, ...rest.slice(-keep)].reduce((sum, message) => sum + tokensIn(message), 0) > maxTokens
+    recentStart < rest.length - 1 &&
+    [...protectedMessages, ...rest.slice(recentStart)].reduce((sum, message) => sum + tokensIn(message), 0) > maxTokens
   ) {
-    keep--;
+    keep = Math.max(1, keep - 1);
+    const nextStart = findSafeRecentStart(rest, keep);
+    if (nextStart === recentStart) break;
+    recentStart = nextStart;
   }
-  if (rest.length <= keep) return null;
+  if (recentStart <= 0) return null;
 
-  const older = rest.slice(0, rest.length - keep);
-  const recent = rest.slice(rest.length - keep);
+  // Stage 1 (free): hide bulky old tool outputs before paying for an LLM summary call.
+  if (!options.force) {
+    const microCount = microCompactOlderToolResults(rest, recentStart);
+    if (microCount > 0) {
+      const tokensAfterMicro = estimateSessionTokens(session);
+      if (tokensAfterMicro <= maxTokens) {
+        await session.save();
+        return {
+          summary: `Скрыты старые выводы инструментов (${microCount}) для экономии токенов.`,
+          removedMessages: 0,
+          tokensBefore,
+          tokensAfter: tokensAfterMicro,
+          mode: 'micro',
+        };
+      }
+    }
+  }
+
+  const older = rest.slice(0, recentStart);
+  const recent = rest.slice(recentStart);
   const transcript = older
     .map((message) => {
       const tools = message.toolCalls || message.toolResults
@@ -114,5 +179,6 @@ export async function compactIfNeeded(
     removedMessages: older.length - 1,
     tokensBefore,
     tokensAfter: estimateSessionTokens(session),
+    mode: 'summary',
   };
 }

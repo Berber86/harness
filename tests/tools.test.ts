@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
+  checkBashCommandSafety,
   createAskUserTool,
   createBashTool,
   createDeleteFileTool,
@@ -12,6 +13,7 @@ import {
   createListFilesTool,
   createReadTool,
   createSearchTool,
+  createTodoWriteTool,
   createWriteTool,
   validateArguments,
 } from '../src/index.js';
@@ -221,6 +223,51 @@ test('ask_user validates questions and returns selected answers', async () => {
     const parsed = JSON.parse(String(out)) as { answers: Array<{ selectedOptionId: string; selectedLabel: string }> };
     assert.equal(parsed.answers[0]?.selectedOptionId, 'b');
     assert.equal(parsed.answers[0]?.selectedLabel, 'Второй');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('bash safety guard blocks destructive/escaping commands and allows normal workspace commands', async () => {
+  const { context, cleanup } = await setup();
+  try {
+    const bash = createBashTool();
+    for (const bad of ['rm -rf /', 'cd .. && dir', 'cat ../../etc/passwd', 'git reset --hard']) {
+      assert.equal(checkBashCommandSafety(bad).safe, false);
+      const res = await bash.execute({ command: bad }, context);
+      assert.equal((res as { isError?: boolean }).isError, true);
+      assert.match((res as { content: string }).content, /фильтром безопасности/);
+    }
+    const ok = await bash.execute({ command: 'node -e "console.log(123)"' }, context);
+    assert.match(String(ok), /123/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('todo_write validates items, triggers callback, and returns progress summary', async () => {
+  const { context, cleanup } = await setup();
+  try {
+    let latest: Array<{ content: string; status: string }> = [];
+    const todo = createTodoWriteTool((items) => {
+      latest = items;
+    });
+    const out = await todo.execute(
+      {
+        todos: [
+          { content: 'Создать каркас', status: 'completed' },
+          { content: 'Добавить прототипы', status: 'in_progress' },
+          { content: 'Проверить в браузере', status: 'pending' },
+        ],
+      },
+      context,
+    );
+    assert.equal(latest.length, 3);
+    assert.match(String(out), /готово 1 из 3/);
+    assert.match(String(out), /Добавить прототипы/);
+
+    const bad = await todo.execute({ todos: [{ content: '', status: 'pending' }] }, context);
+    assert.equal((bad as { isError?: boolean }).isError, true);
   } finally {
     await cleanup();
   }

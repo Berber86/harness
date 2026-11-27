@@ -40,6 +40,7 @@ import type {
   Usage,
 } from '../index.js';
 import { buildZip } from './zip.js';
+import { createLongTimeoutFetch, formatNetworkError } from '../providers/fetch-retry.js';
 import {
   applyGitHubUpdate,
   checkGitHubUpdate,
@@ -520,9 +521,10 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
       return;
     }
     try {
-      const response = await fetch(`${baseURL}/models`, {
-        headers: { authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(15_000),
+      const longFetch = createLongTimeoutFetch();
+      const response = await longFetch(`${baseURL}/models`, {
+        headers: { authorization: `Bearer ${apiKey.trim()}` },
+        signal: AbortSignal.timeout(300_000),
       });
       if (!response.ok) {
         sendJson(res, response.status, { error: `HydraAI ответил ${response.status}. Проверьте ключ.` });
@@ -535,7 +537,7 @@ export function createAppServer(options: AppServerOptions = {}): http.Server {
         .slice(0, 300);
       sendJson(res, 200, { models });
     } catch (error) {
-      sendJson(res, 502, { error: `Не удалось получить модели: ${(error as Error).message}` });
+      sendJson(res, 502, { error: `Не удалось получить модели: ${formatNetworkError(error).message}` });
     }
   }
 

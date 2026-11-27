@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { test } from 'node:test';
 import { anthropicProvider, openaiCompatibleProvider, toOpenAIMessages } from '../src/index.js';
 import type { ProviderStreamEvent } from '../src/index.js';
@@ -171,4 +172,39 @@ test('toOpenAIMessages converts mid-conversation system updates into system-remi
   assert.equal(mapped[1]?.role, 'user');
   assert.equal(mapped[2]?.role, 'user');
   assert.match(String(mapped[2]?.content), /<system-reminder>[\s\S]*MODE: ACT/);
+});
+
+test('OpenAI-compatible provider streams over built-in long-timeout HTTP transport', async () => {
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      assert.equal(req.headers.authorization, 'Bearer k-live');
+      assert.match(body, /"stream":true/);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Привет' }, index: 0 }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  try {
+    const provider = openaiCompatibleProvider({
+      apiKey: 'k-live',
+      baseURL: `http://127.0.0.1:${port}/v1`,
+      timeoutMs: 300_000,
+    });
+    const events = await collect(provider.chat({ model, messages, tools: [] }));
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['text_delta', 'done'],
+    );
+    assert.equal(events[0]?.type === 'text_delta' && events[0].text, 'Привет');
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  }
 });

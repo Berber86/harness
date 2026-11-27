@@ -1,5 +1,5 @@
 import type { ChatRequest, ModelProvider, ProviderStreamEvent, StopReason, Usage } from '../types.js';
-import { fetchWithRetry, formatNetworkError } from './fetch-retry.js';
+import { createLongTimeoutFetch, DEFAULT_REQUEST_TIMEOUT_MS, fetchWithRetry, formatNetworkError } from './fetch-retry.js';
 import { toOpenAIMessages } from './messages.js';
 import { parseSSE } from './sse.js';
 
@@ -7,6 +7,7 @@ export interface OpenAICompatibleOptions {
   apiKey?: string;
   baseURL?: string;
   fetch?: typeof fetch;
+  timeoutMs?: number;
 }
 
 const STOP_REASONS: Record<string, StopReason> = {
@@ -23,7 +24,7 @@ const STOP_REASONS: Record<string, StopReason> = {
 export function openaiCompatibleProvider(options: OpenAICompatibleOptions = {}): ModelProvider {
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? '';
   const baseURL = (options.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
-  const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const fetchImpl = options.fetch ?? createLongTimeoutFetch(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
   return {
     name: 'openai-compatible',
